@@ -1,0 +1,18 @@
+pointcloud_to_laserscan:
+  ros__parameters:
+    # Angular ROI (Region of Interest) settings in radians
+    azimuth_min: -3.14       # Minimum azimuth angle (horizontal field of view)
+    azimuth_max: 3.14        # Maximum azimuth angle (horizontal field of view)
+    elevation_min: -0.79     # Minimum elevation angle (vertical field of view)
+    elevation_max: 0.79      # Maximum elevation angle (vertical field of view)
+
+    # Range settings in meters
+    range_min: 0.1           # Minimum range (distance to detect points)
+    range_max: 5.0           # Maximum range (distance to detect points)
+
+    # Topic and frame configurations
+    input_topic: "/camera/depth/depth/color/points"  # Name of the input PointCloud2 topic
+    output_frame: "laser"                           # Target TF frame for LaserScan output
+    # For TF Transformation
+    #transform_timeout: 3.0
+

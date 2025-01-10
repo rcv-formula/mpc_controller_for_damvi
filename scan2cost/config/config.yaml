@@ -1,0 +1,24 @@
+scan2cost:
+  ros__parameters:
+    input_topic: "/scan"
+    output_topic: "/local_costmap"
+    frame_id: "base_link"
+    resolution: 0.05 # m
+    width: 200 # cells
+    height: 200 # cells
+    origin_x: -5.0 # m
+    origin_y: -5.0 # m
+
+    static_transform:
+      frame_id: "base_link"
+      child_frame_id: "laser"
+      translation: # m
+        x: 0.2
+        y: 0.0
+        z: 0.0
+      rotation:
+        x: 0.0
+        y: 0.0
+        z: 0.0
+        w: 1.0
+
