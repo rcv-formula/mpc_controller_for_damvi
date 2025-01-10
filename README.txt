@@ -1,4 +1,4 @@
-안녕하세요 MPC 부분을 맡은 임준형입니다
+안녕하세요 MPC 부분을 맡은 임준형입니다.
 
 <01.08.2025 기준>
 MPC Controller - Not Tested
