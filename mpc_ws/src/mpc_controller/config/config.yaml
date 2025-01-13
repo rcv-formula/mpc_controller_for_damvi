@@ -1,0 +1,34 @@
+# Car specifications
+car:
+  WB: 0.315  # Wheel Base : Distance between front and rear axles [m]
+  WHEEL_WIDTH: 0.22  # Width of the wheels [m]
+  
+  MAX_STEER: 45 # maximum steering angle [angles]
+  MAX_DSTEER: 30 # maximum steering speed [angles/s]
+  MAX_SPEED: 4.5  # maximum speed [m/s]
+  MIN_SPEED: -1.0  # minimum speed [m/s]
+  MAX_ACCEL: 1.0  # maximum accel [m/s^2]
+
+# MPC parameters
+mpc:
+  NX: 4 # X = [x, y, v, yaw]
+  NU: 2 # a = [accel, steer]
+  T: 10  # Prediction Horizon
+  DT: 0.1  # Time step (seconds)
+  
+  N_IND_SEARCH: 10 # Search Index Number
+  MAX_ITER: 3  # Max iteration
+  DU_TH: 0.1  # iteration finish param
+
+# Weights
+weights:
+  Q: [1.0, 1.0, 0.5, 0.5]  # Weights for state variables [x, y, v, yaw]
+  Qf: [20, 20, 2, 1]  # Terminal weights for state variables # state final matrix
+  R: [0.01, 0.01]  # Weights for control inputs [acceleration, steering_rate]
+  Rd: [0.01, 1.0] # input difference cost matrix
+
+# Map Resolution
+map:
+  out_of_bounds_penalty: 1000
+  global_path: Spielberg_map
+        
