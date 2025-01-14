@@ -6,7 +6,7 @@ car:
   MAX_STEER: 45 # maximum steering angle [angles]
   MAX_DSTEER: 30 # maximum steering speed [angles/s]
   MAX_SPEED: 4.5  # maximum speed [m/s]
-  MIN_SPEED: -1.0  # minimum speed [m/s]
+  MIN_SPEED: 0.1  # minimum speed [m/s]
   MAX_ACCEL: 1.0  # maximum accel [m/s^2]
 
 # MPC parameters
@@ -22,13 +22,15 @@ mpc:
 
 # Weights
 weights:
-  Q: [1.0, 1.0, 0.5, 0.5]  # Weights for state variables [x, y, v, yaw]
+  Q: [1.0, 1.0, 1.0, 0.5] # Weights for state variables [x, y, v, yaw]
   Qf: [20, 20, 2, 1]  # Terminal weights for state variables # state final matrix
-  R: [0.01, 0.01]  # Weights for control inputs [acceleration, steering_rate]
-  Rd: [0.01, 1.0] # input difference cost matrix
+  R: [0.01, 0.1]  # Weights for control inputs [acceleration, steering_rate]
+  Rd: [0.01, 0.01] # input difference cost matrix
 
 # Map Resolution
 map:
   out_of_bounds_penalty: 1000
   global_path: Spielberg_map
-        
+
+control:
+  CONTROL_RATE: 0.05  # 20 Hz

@@ -16,11 +16,14 @@ class MPCController(Node):
 
         # Load parameters from YAML file
         self.load_config()
-        self.global_path_np = self.load_global_path(self.global_path_dir)
+        self.load_global_path(self.global_path_dir)
 
         # Placeholders
         self.reference_path = None
         self.cost_map = None
+        self.transformed_segment = None
+        self.cx = self.cy = self.sp = self.cyaw = np.empty((0,))
+        self.update_reference_path()
 
         # State and control Variables
         self.state = np.zeros(4) # [x, y, v, yaw]
@@ -32,7 +35,7 @@ class MPCController(Node):
 
         # Publisher
         self.local_path_publisher = self.create_publisher(Path, '/local_path', 10)
-        self.ackm_drive_publisher = self.create_publisher(AckermannDriveStamped, '/ackermann_drive', 10)
+        self.ackm_drive_publisher = self.create_publisher(AckermannDriveStamped, '/drive', 10)
 
         # TF2 buffer and listener
         self.tf_buffer = tf2_ros.Buffer()
@@ -45,6 +48,10 @@ class MPCController(Node):
         # Start the MPC control loop in a separate thread
         self.mpc_thread = threading.Thread(target=self.run_mpc, daemon=True)
         self.mpc_thread.start()
+
+        # Updates at 10 Hz
+        self.reference_update_timer = self.create_timer(0.1, self.update_reference_path)  
+    
 
     def load_config(self):
         # Load Parameters from YAML file
@@ -86,6 +93,10 @@ class MPCController(Node):
         map_config = config['map']
         self.out_of_bounds_penalty = map_config['out_of_bounds_penalty']
         self.global_path_dir = os.path.join(package_dir, 'map', f"{map_config['global_path']}.csv")
+        
+        # Control
+        control_config = config['control']
+        self.CONTROL_RATE = control_config['CONTROL_RATE']
 
     def validate_config(self, config):
         required_keys = ['car', 'mpc', 'weights', 'map']
@@ -96,16 +107,13 @@ class MPCController(Node):
     def load_global_path(self, csv_file_path):
         try:
             waypoints = np.loadtxt(csv_file_path, delimiter=',')
+
             if waypoints.shape[1] != 3:
                 self.get_logger().warn("Error: CSV File should have 3 columns")
                 return []
 
-            global_path_np = waypoints
-            self.get_logger().info(f"Loaded {len(global_path_np)} way points from {csv_file_path}")
-
-            self.global_path_callback(global_path_np)
-
-            return global_path_np
+            self.global_path_np = waypoints
+            self.get_logger().info(f"Loaded {len(self.global_path_np)} way points from {csv_file_path}")
 
         except Exception as e:
             self.get_logger().warn(f"Failed to load waypoints from {csv_file_path}: {e}")
@@ -121,44 +129,60 @@ class MPCController(Node):
         self.state[1] = msg.pose.pose.position.y
         self.state[2] = msg.twist.twist.linear.x
         self.state[3] = yaw
-        self.global_path_callback(self.global_path_np)
 
-    def global_path_callback(self, global_path_np):
+    def update_reference_path(self):
+        """
+        Periodically updates the reference path based on the current state.
+        """
+        # if np.all(self.state == 0):
+        #     # If global path or state is not initialized, do nothing
+        #     self.get_logger().info("Possibility of Defect Odometry, skipping reference update.")
+        #     return
 
-        try:
-            # Transform the global path to the base_link frame
-            transformed_path = self.transform_global_path_to_base_link(global_path_np)
-            if transformed_path is None:
-                return
+        if self.global_path_np is None or len(self.global_path_np) == 0:
+            self.get_logger().warn("Global path is empty. Cannot update reference path.")
+            return
 
-            # Save the transformed path
-            self.reference_path = self.calculate_reference_points(transformed_path)
+        # Find the nearest index on the global path to the current state
+        nearest_idx, _ = self.calculate_nearest_index(0)
+        segment_start = max(0, nearest_idx - 10)  # Include a few points behind
+        segment_end = min(len(self.global_path_np), nearest_idx + 50)  # Include a few points ahead
+        segment = self.global_path_np[segment_start:segment_end]
 
+        # Transform and calculate reference points
+        self.transformed_path_segment = self.transform_global_path_to_base_link(segment)
+        if self.transformed_path_segment is not None:
+            self.reference_path = self.calculate_reference_points(self.transformed_path_segment)
             self.cx = self.reference_path[:,0]
             self.cy = self.reference_path[:,1]
             self.sp = self.reference_path[:,2]
             self.cyaw = self.reference_path[:,3]
-            #self.get_logger().info('Successfully loaded Global Path')
-            #self.debug_function()
-        
-        except Exception as e:
-            self.get_logger().warn(f"Failed to process global path: {e}")
+            self.get_logger().info(f"Updated reference path: Start={segment_start}, End={segment_end}")
+        else:
+            self.get_logger().warn("Failed to transform path segment.")
 
     def local_costmap_callback(self, msg):
         # Obtain local cost map
         pass    
 
-    def transform_global_path_to_base_link(self, global_path_np):
+    def transform_global_path_to_base_link(self, segments):
         # Check for valid transform
 
-        try:
-            transform = self.tf_buffer.lookup_transform(
-                "base_link",  # Target frame
-                "map",  # Map frame
-                rclpy.time.Time()  # Use the latest available transform
-            )
-        except tf2_ros.TransformException as e:
-            self.get_logger().warn(f"Failed to lookup transform: {e}")
+        for _ in range(10):  # Retry up to 10 times
+            try:
+                transform = self.tf_buffer.lookup_transform(
+                    "ego_racecar/base_link", 
+                    "map", 
+                    rclpy.time.Time()
+                )
+                break
+            except tf2_ros.TransformException as e:
+                self.get_logger().warn(f"TF lookup failed: {e}")
+                time.sleep(0.1)
+                return None
+        else:
+            self.get_logger().error("Failed to lookup transform after multiple attempts")
+            return None
 
         # Extract transloation and rotation from the transform
         translation = transform.transform.translation
@@ -169,24 +193,24 @@ class MPCController(Node):
         transform_matrix[:3, 3] = [translation.x, translation.y, translation.z]
 
         # Transform each pose and store as NumPy array
-        num_points = global_path_np.shape[0]
-        homogeneous_points = np.hstack((global_path_np[:, :2], np.zeros((num_points, 1)), np.ones((num_points, 1))))
+        num_points = segments.shape[0]
+        homogeneous_points = np.hstack((segments[:, :2], np.zeros((num_points, 1)), np.ones((num_points, 1))))
         transformed_points = (transform_matrix @ homogeneous_points.T).T
 
         # Preserve velocity and return trasnformed path
-        transformed_path = np.hstack((transformed_points[:, :2], global_path_np[:, 2:3]))
+        transformed_path = np.hstack((transformed_points[:, :2], segments[:, 2:3]))
 
         return transformed_path
 
-    def calculate_reference_points(self, transformed_path):
+    def calculate_reference_points(self, transformed_path_segment):
         # Number of Points in transformed_path
-        num_points = transformed_path.shape[0]
+        num_points = transformed_path_segment.shape[0]
         reference_points = np.zeros((num_points,4)) # [x, y, v, yaw]
 
         for i in range(num_points-1):
             # Current and next points
-            current_point = transformed_path[i]
-            next_point = transformed_path[i+1]
+            current_point = transformed_path_segment[i]
+            next_point = transformed_path_segment[i+1]
 
             # Store x and y
             reference_points[i,0] = current_point[0]
@@ -199,14 +223,18 @@ class MPCController(Node):
             reference_points[i,3] = np.arctan2(dy,dx)
 
         # Last point, dx dy can not be calculated
-        reference_points[-1,0] = transformed_path[-1,0]
-        reference_points[-1,1] = transformed_path[-1,1]
-        reference_points[-1,2] = transformed_path[-1,2] # reference velocity
+        reference_points[-1,0] = transformed_path_segment[-1,0]
+        reference_points[-1,1] = transformed_path_segment[-1,1]
+        reference_points[-1,2] = transformed_path_segment[-1,2] # reference velocity
         reference_points[-1,3] = reference_points[-2,3] if num_points > 1 else 0.0
 
         return reference_points
 
     def calculate_nearest_index(self, pind):
+        if len(self.cx) == 0 or len(self.cy) == 0:
+            self.get_logger().warn("Reference path is not populated. Cannot calculate nearest index.")
+            return 0, float('inf')  # Return a default index and infinite distance
+
         dx = [self.state[0]-icx for icx in self.cx[pind:(pind + self.N_IND_SEARCH)]]
         dy = [self.state[1]-icx for icx in self.cx[pind:(pind + self.N_IND_SEARCH)]]
 
@@ -390,7 +418,9 @@ class MPCController(Node):
             poa, pod = oa[:], od[:]
             oa, od, ox, oy, oyaw, ov = self.linear_mpc_control(xref, xbar, x0, dref)
             du = sum(abs(oa - poa)) + sum(abs(od - pod))  # calc u change value
+            self.get_logger().info(f"Iteration {i}: Control change (du) = {du}")
             if du <= self.DU_TH:
+                self.get_logger().info(f"Converged after {i} iterations.")
                 break
         else:
             print("Iterative is max iter")
@@ -405,25 +435,25 @@ class MPCController(Node):
         Runs the MPC control loop for a looping global path.
         """
         self.get_logger().info("Starting MPC control loop...")
-        
-        # Wait until the reference path is available
-        while self.reference_path is None:
-            self.get_logger().info("Global Path is unavailable, check TF")
-            self.global_path_callback(self.global_path_np)
-            time.sleep(2.0)
-
-        # Wait until odometry is available
-        while self.state is None:
-            self.get_logger().info("Waiting for odometry...")
-            time.sleep(1.0)
 
         oa, od = None, None  # Previous acceleration and steering
         pind = 0  # Path index
 
         # Continuous control loop
         while rclpy.ok():
+            if self.reference_path is None or len(self.reference_path) == 0 :
+                self.get_logger().info("Waiting for reference path or state initialization...")
+                time.sleep(0.1)
+                continue
+        # while rclpy.ok():
+        #     if self.reference_path is None or len(self.reference_path) == 0 or np.all(self.state == 0):
+        #         self.get_logger().info("Waiting for reference path or state initialization...")
+        #         time.sleep(0.1)
+        #         continue
+
             # Wrap path index for looping
             pind %= len(self.cx)
+            pind = max(0, pind)   # Ensure it's within bounds
 
             # Compute reference trajectory
             xref, ind, dref = self.calculate_ref_trajectory(pind)
@@ -431,27 +461,26 @@ class MPCController(Node):
 
             # Solve MPC
             oa, od, ox, oy, oyaw, ov = self.iterative_linear_mpc_control(xref, self.state, dref, oa, od)
-            print(ox)
-            if oa is None or od is None:
-                self.get_logger().warn("MPC failed to find a solution. Stopping control.")
-                break
 
-            # Apply control inputs by publishing to /ackermann_drive
-            accel, delta = oa[0], od[0]
+            if oa is None or od is None:
+                self.get_logger().warn("MPC solver failed. Using fallback controls.")
+                oa, od = [0.1] * self.T, [0.0] * self.T  # Default inputs
+                accel, delta = 0.1, 0.0  # Default inputs
+                break
+            else:
+                accel, delta = oa[0], od[0]
+
             self.publish_control(accel, delta)
 
-            # Optional: Publish the local path for visualization
-            # self.debug_function()
-
             # Wait for the next control cycle
-            # time.sleep(self.DT)
+            time.sleep(self.CONTROL_RATE)
 
         self.get_logger().info("MPC control loop stopped.")
 
     def publish_control(self, accel, delta):
         drive_msg = AckermannDriveStamped()
         drive_msg.header.stamp = self.get_clock().now().to_msg()
-        drive_msg.header.frame_id = "base_link"
+        drive_msg.header.frame_id = "ego_racecar/base_link"
 
         drive_msg.drive.speed = self.state[2]  # Current speed
         drive_msg.drive.acceleration = accel
@@ -466,19 +495,31 @@ class MPCController(Node):
         except Exception as e:
             self.get_logger().error(f"Failed to get TF frames: {e}")
 
-
     def debug_function(self):
+        """
+        Publishes the reference path and transformed segment for debugging.
+        """
         path_msg = Path()
-        path_msg.header.frame_id = "base_link"  # Local frame for visualization
+        path_msg.header.frame_id = "ego_racecar/base_link"
         path_msg.header.stamp = self.get_clock().now().to_msg()
 
-        for i in range(len(self.reference_path)):
-            pose = PoseStamped()
-            pose.header.frame_id = "base_link"
-            pose.header.stamp = self.get_clock().now().to_msg()
-            pose.pose.position.x = self.reference_path[i,0]
-            pose.pose.position.y = self.reference_path[i,1]
-            path_msg.poses.append(pose)
+        # Visualize reference path
+        if self.reference_path is not None:
+            for i in range(len(self.reference_path)):
+                pose = PoseStamped()
+                pose.header.frame_id = "ego_racecar/base_link"
+                pose.pose.position.x = self.reference_path[i, 0]
+                pose.pose.position.y = self.reference_path[i, 1]
+                path_msg.poses.append(pose)
+
+        # Visualize transformed segment
+        if self.transformed_segment is not None:
+            for i in range(len(self.transformed_segment)):
+                pose = PoseStamped()
+                pose.header.frame_id = "ego_racecar/base_link"
+                pose.pose.position.x = self.transformed_segment[i, 0]
+                pose.pose.position.y = self.transformed_segment[i, 1]
+                path_msg.poses.append(pose)
 
         self.local_path_publisher.publish(path_msg)
 
