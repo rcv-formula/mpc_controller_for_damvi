@@ -96,12 +96,11 @@ class MPCController(Node):
     def load_global_path(self, csv_file_path):
         try:
             waypoints = np.loadtxt(csv_file_path, delimiter=',')
-
             if waypoints.shape[1] != 3:
                 self.get_logger().warn("Error: CSV File should have 3 columns")
                 return []
 
-            global_path_np = [(row[0], row[1], row[2]) for row in waypoints]
+            global_path_np = waypoints
             self.get_logger().info(f"Loaded {len(global_path_np)} way points from {csv_file_path}")
 
             self.global_path_callback(global_path_np)
