@@ -18,10 +18,6 @@ class MPCController(Node):
         self.load_config()
         self.global_path_np = self.load_global_path(self.global_path_dir)
 
-        # Start the MPC control loop in a separate thread
-        self.control_thread = threading.Thread(target=self.run_mpc, daemon=True)
-        self.control_thread.start()
-
         # Placeholders
         self.reference_path = None
         self.cost_map = None
@@ -46,6 +42,9 @@ class MPCController(Node):
         self.debug_tf()
         self.get_logger().info("MPC node started")
 
+        # Start the MPC control loop in a separate thread
+        self.mpc_thread = threading.Thread(target=self.run_mpc, daemon=True)
+        self.mpc_thread.start()
 
     def load_config(self):
         # Load Parameters from YAML file
@@ -500,12 +499,17 @@ class MPCController(Node):
 
         self.local_path_publisher.publish(path_msg)
 
+
 def main(args=None):
     rclpy.init(args=args)
     node = MPCController()
-    rclpy.spin(node)  # Allows ROS callbacks and parameter queries
-    node.destroy_node()
-    rclpy.shutdown()
+    try:
+        rclpy.spin(node)  # Keeps the node responsive to callbacks
+    except KeyboardInterrupt:
+        node.get_logger().info("MPC control loop interrupted.")
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
 
 if __name__ == '__main__':
     main()
