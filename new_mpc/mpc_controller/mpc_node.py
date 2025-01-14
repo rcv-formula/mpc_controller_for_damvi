@@ -1,4 +1,4 @@
-import cvxpy, yaml, math, time, os
+import cvxpy, yaml, math, time, os, threading
 import rclpy, tf2_ros
 import numpy as np
 from rclpy.node import Node
@@ -17,6 +17,10 @@ class MPCController(Node):
         # Load parameters from YAML file
         self.load_config()
         self.global_path_np = self.load_global_path(self.global_path_dir)
+
+        # Start the MPC control loop in a separate thread
+        self.control_thread = threading.Thread(target=self.run_mpc, daemon=True)
+        self.control_thread.start()
 
         # Placeholders
         self.reference_path = None
@@ -499,13 +503,9 @@ class MPCController(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = MPCController()
-    try:
-        node.run_mpc()
-    except KeyboardInterrupt:
-        node.get_logger().info("MPC control loop interrupted.")
-    finally:
-        node.destroy_node()
-        rclpy.shutdown()
+    rclpy.spin(node)  # Allows ROS callbacks and parameter queries
+    node.destroy_node()
+    rclpy.shutdown()
 
 if __name__ == '__main__':
     main()
