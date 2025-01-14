@@ -27,7 +27,7 @@ class MPCController(Node):
         self.control = np.zeros(2) # [acceleration, steering_angle]
 
         # Subscriber
-        self.create_subscription(Odometry, '/odom', self.odom_callback, 10)
+        self.create_subscription(Odometry, '/ego_racecar/odom', self.odom_callback, 10)
         self.create_subscription(OccupancyGrid, '/local_costmap', self.local_costmap_callback, 10)
 
         # Publisher
