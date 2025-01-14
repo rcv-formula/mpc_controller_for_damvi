@@ -121,6 +121,7 @@ class MPCController(Node):
         self.state[1] = msg.pose.pose.position.y
         self.state[2] = msg.twist.twist.linear.x
         self.state[3] = yaw
+        self.global_path_callback(self.global_path_np)
 
     def global_path_callback(self, global_path_np):
 
@@ -137,7 +138,7 @@ class MPCController(Node):
             self.cy = self.reference_path[:,1]
             self.sp = self.reference_path[:,2]
             self.cyaw = self.reference_path[:,3]
-            self.get_logger().info('Successfully loaded Global Path')
+            #self.get_logger().info('Successfully loaded Global Path')
             #self.debug_function()
         
         except Exception as e:
@@ -150,30 +151,14 @@ class MPCController(Node):
     def transform_global_path_to_base_link(self, global_path_np):
         # Check for valid transform
 
-        # try:
-        #     transform = self.tf_buffer.lookup_transform(
-        #         "base_link",  # Target frame
-        #         "map",  # Map frame
-        #         rclpy.time.Time()  # Use the latest available transform
-        #     )
-        # except tf2_ros.TransformException as e:
-        #     self.get_logger().warn(f"Failed to lookup transform: {e}")
-
-        for _ in range(10):  # Retry up to 10 times
-            try:
-                transform = self.tf_buffer.lookup_transform(
-                    "base_link",  # Target frame
-                    "map",  # Source frame
-                    rclpy.time.Time()  # Use the latest available transform
-                )
-                break
-            except tf2_ros.TransformException as e:
-                self.get_logger().warn(f"Failed to lookup transform: {e}")
-                time.sleep(0.5)  # Retry after a short delay
-        else:
-            self.get_logger().error("Failed to lookup transform after 10 attempts")
-            return None
-
+        try:
+            transform = self.tf_buffer.lookup_transform(
+                "base_link",  # Target frame
+                "map",  # Map frame
+                rclpy.time.Time()  # Use the latest available transform
+            )
+        except tf2_ros.TransformException as e:
+            self.get_logger().warn(f"Failed to lookup transform: {e}")
 
         # Extract transloation and rotation from the transform
         translation = transform.transform.translation
@@ -425,7 +410,6 @@ class MPCController(Node):
         while self.reference_path is None:
             self.get_logger().info("Global Path is unavailable, check TF")
             self.global_path_callback(self.global_path_np)
-            self.debug_tf()
             time.sleep(2.0)
 
         # Wait until odometry is available
@@ -447,7 +431,7 @@ class MPCController(Node):
 
             # Solve MPC
             oa, od, ox, oy, oyaw, ov = self.iterative_linear_mpc_control(xref, self.state, dref, oa, od)
-
+            print(ox)
             if oa is None or od is None:
                 self.get_logger().warn("MPC failed to find a solution. Stopping control.")
                 break
