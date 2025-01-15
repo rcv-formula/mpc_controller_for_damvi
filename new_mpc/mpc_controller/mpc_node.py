@@ -113,15 +113,14 @@ class MPCController(Node):
             waypoints = np.loadtxt(csv_file_path, delimiter=',')
 
             if waypoints.shape[1] != 3:
-                self.get_logger().warn("Error: CSV File should have 3 columns")
-                return []
+                raise ValueError("Global path CSV must have exactly 3 columns: [x, y, velocity]")
 
             self.global_path_np = waypoints
             self.get_logger().info(f"Loaded {len(self.global_path_np)} way points from {csv_file_path}")
 
         except Exception as e:
             self.get_logger().warn(f"Failed to load waypoints from {csv_file_path}: {e}")
-            return []
+            self.global_path_np = None
 
     def odom_callback(self, msg):
         # Update robot's state from Odometry
@@ -144,15 +143,17 @@ class MPCController(Node):
         # 실제로할땐, 처음에 transform_global_path_to_base_link()해줘야함. (odom이랑 base_link랑 처음엔 같다는 가정)
         # Ensure global path is available for initialization
 
-        print(self.global_path_np)
         if self.cx.size == 0 or self.cy.size == 0:
             # self.get_logger().info("Populating reference arrays from the global path for initialization.")
-            
-            init_global_path = self.transform_global_path_to_base_link(self.global_path_np)
+            # init_global_path = None
+            # while ( init_global_path is None ):
+            init_global_path    = self.transform_global_path_to_base_link(self.global_path_np)
+
             init_reference_path = self.calculate_reference_points(init_global_path)
-            self.cx = init_reference_path[:, 0]
-            self.cy = init_reference_path[:, 1]
-            self.sp = init_reference_path[:, 2]
+
+            self.cx   = init_reference_path[:, 0]
+            self.cy   = init_reference_path[:, 1]
+            self.sp   = init_reference_path[:, 2]
             self.cyaw = init_reference_path[:, 3]
 
         # Calculate nearest index
@@ -182,40 +183,47 @@ class MPCController(Node):
 
     def transform_global_path_to_base_link(self, segments):
         # Check for valid transform
-
-        for _ in range(10):  # Retry up to 10 times
-            try:
-                transform = self.tf_buffer.lookup_transform(
-                    "ego_racecar/base_link", 
-                    "map", 
-                    rclpy.time.Time()
-                )
-                break
-            except tf2_ros.TransformException as e:
-                self.get_logger().warn(f"TF lookup failed: {e}")
-                time.sleep(0.1)
-                return None
-        else:
-            self.get_logger().error("Failed to lookup transform after multiple attempts")
+        if segments is None or len(segments) == 0:
+            self.get_logger().warn("Path segment is empty or None. Cannot transform.")
             return None
+        try:
+            for _ in range(10):  # Retry up to 10 times
+                try:
+                    transform = self.tf_buffer.lookup_transform(
+                        "ego_racecar/base_link", 
+                        "map", 
+                        rclpy.time.Time()
+                    )
+                    break
+                except tf2_ros.TransformException as e:
+                    self.get_logger().warn(f"TF lookup failed: {e}")
+                    time.sleep(0.1)
+            else:
+                self.get_logger().error("Failed to lookup transform after multiple attempts")
+                return None
 
-        # Extract transloation and rotation from the transform
-        translation = transform.transform.translation
-        rotation = transform.transform.rotation
+            # Extract transloation and rotation from the transform
+            translation = transform.transform.translation
+            rotation = transform.transform.rotation
 
-        # Convert rotation to a transformation matrix
-        transform_matrix = quaternion_matrix([rotation.x, rotation.y, rotation.z, rotation.w])
-        transform_matrix[:3, 3] = [translation.x, translation.y, translation.z]
+            # Convert rotation to a transformation matrix
+            transform_matrix = quaternion_matrix([rotation.x, rotation.y, rotation.z, rotation.w])
+            transform_matrix[:3, 3] = [translation.x, translation.y, translation.z]
 
-        # Transform each pose and store as NumPy array
-        num_points = segments.shape[0]
-        homogeneous_points = np.hstack((segments[:, :2], np.zeros((num_points, 1)), np.ones((num_points, 1))))
-        transformed_points = (transform_matrix @ homogeneous_points.T).T
+            # Transform each pose and store as NumPy array
+            num_points = segments.shape[0]
+            homogeneous_points = np.hstack((segments[:, :2], np.zeros((num_points, 1)), np.ones((num_points, 1))))
+            transformed_points = (transform_matrix @ homogeneous_points.T).T
 
-        # Preserve velocity and return trasnformed path
-        transformed_path = np.hstack((transformed_points[:, :2], segments[:, 2:3]))
+            # Preserve velocity and return trasnformed path
+            transformed_path = np.hstack((transformed_points[:, :2], segments[:, 2:3]))
 
-        return transformed_path
+            return transformed_path
+        
+        except Exception as e:
+            self.get_logger().error(f"Error in transform_global_path_to_base_link: {e}")
+            return None
+            
 
     def calculate_reference_points(self, transformed_path_segment):
         # Number of Points in transformed_path
