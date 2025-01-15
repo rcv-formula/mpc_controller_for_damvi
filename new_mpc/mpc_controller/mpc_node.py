@@ -127,7 +127,7 @@ class MPCController(Node):
 
         self.state[0] = msg.pose.pose.position.x
         self.state[1] = msg.pose.pose.position.y
-        self.state[2] = msg.twist.twist.linear.x
+        self.state[2] = msg.twistTransFormStamped.twist.linear.x
         self.state[3] = yaw
 
     def update_reference_path(self):
