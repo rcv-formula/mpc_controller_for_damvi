@@ -18,16 +18,23 @@ class MPCController(Node):
         self.load_config()
         self.load_global_path(self.global_path_dir)
 
+        # TF2 buffer and listener
+        self.tf_buffer = tf2_ros.Buffer()
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
+        self.get_logger().info("Waiting for TF frames...")
+        time.sleep(2)  # Delay to allow TF frames to populate
+        self.debug_tf()
+
+        # State and control Variables
+        self.state = np.zeros(4) # [x, y, v, yaw]
+        self.control = np.zeros(2) # [acceleration, steering_angle]
+
         # Placeholders
         self.reference_path = None
         self.cost_map = None
         self.transformed_segment = None
         self.cx = self.cy = self.sp = self.cyaw = np.empty((0,))
-        self.update_reference_path()
-
-        # State and control Variables
-        self.state = np.zeros(4) # [x, y, v, yaw]
-        self.control = np.zeros(2) # [acceleration, steering_angle]
+        
 
         # Subscriber
         self.create_subscription(Odometry, '/ego_racecar/odom', self.odom_callback, 10)
@@ -36,22 +43,19 @@ class MPCController(Node):
         # Publisher
         self.local_path_publisher = self.create_publisher(Path, '/local_path', 10)
         self.ackm_drive_publisher = self.create_publisher(AckermannDriveStamped, '/drive', 10)
-
-        # TF2 buffer and listener
-        self.tf_buffer = tf2_ros.Buffer()
-        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
-        self.get_logger().info("Waiting for TF frames...")
-        time.sleep(2)  # Delay to allow TF frames to populate
-        self.debug_tf()
-        self.get_logger().info("MPC node started")
+        self.segment_publisher = self.create_publisher(Path, '/visualized_path_segment', 10)
 
         # Start the MPC control loop in a separate thread
         self.mpc_thread = threading.Thread(target=self.run_mpc, daemon=True)
         self.mpc_thread.start()
+        self.get_logger().info("MPC node started")
 
         # Updates at 10 Hz
+        self.update_reference_path()
         self.reference_update_timer = self.create_timer(0.1, self.update_reference_path)  
-    
+        # Timer to publish path segments at 10 Hz
+        self.create_timer(0.1, self.publish_reference_path)
+
 
     def load_config(self):
         # Load Parameters from YAML file
@@ -130,36 +134,47 @@ class MPCController(Node):
         self.state[2] = msg.twist.twist.linear.x
         self.state[3] = yaw
 
+        # self.get_logger().info("Odom Callback Called")
+
+
+
     def update_reference_path(self):
-        """
-        Periodically updates the reference path based on the current state.
-        """
-        # if np.all(self.state == 0):
-        #     # If global path or state is not initialized, do nothing
-        #     self.get_logger().info("Possibility of Defect Odometry, skipping reference update.")
-        #     return
 
-        if self.global_path_np is None or len(self.global_path_np) == 0:
-            self.get_logger().warn("Global path is empty. Cannot update reference path.")
-            return
+        # 이거 시작할때 맵이랑 base_link랑 정렬되어있어야함. 시뮬에서는 정렬되어있으니 일단 보류
+        # 실제로할땐, 처음에 transform_global_path_to_base_link()해줘야함. (odom이랑 base_link랑 처음엔 같다는 가정)
+        # Ensure global path is available for initialization
 
-        # Find the nearest index on the global path to the current state
+        print(self.global_path_np)
+        if self.cx.size == 0 or self.cy.size == 0:
+            # self.get_logger().info("Populating reference arrays from the global path for initialization.")
+            
+            init_global_path = self.transform_global_path_to_base_link(self.global_path_np)
+            init_reference_path = self.calculate_reference_points(init_global_path)
+            self.cx = init_reference_path[:, 0]
+            self.cy = init_reference_path[:, 1]
+            self.sp = init_reference_path[:, 2]
+            self.cyaw = init_reference_path[:, 3]
+
+        # Calculate nearest index
         nearest_idx, _ = self.calculate_nearest_index(0)
-        segment_start = max(0, nearest_idx - 10)  # Include a few points behind
-        segment_end = min(len(self.global_path_np), nearest_idx + 50)  # Include a few points ahead
-        segment = self.global_path_np[segment_start:segment_end]
 
-        # Transform and calculate reference points
-        self.transformed_path_segment = self.transform_global_path_to_base_link(segment)
-        if self.transformed_path_segment is not None:
-            self.reference_path = self.calculate_reference_points(self.transformed_path_segment)
-            self.cx = self.reference_path[:,0]
-            self.cy = self.reference_path[:,1]
-            self.sp = self.reference_path[:,2]
-            self.cyaw = self.reference_path[:,3]
-            self.get_logger().info(f"Updated reference path: Start={segment_start}, End={segment_end}")
+        # Define segment range
+        start_idx = max(0, nearest_idx - 10)
+        end_idx = min(len(self.global_path_np), nearest_idx + 50)
+
+        # Transform segment to base_link
+        segment = self.global_path_np[start_idx:end_idx]
+        transformed_segment = self.transform_global_path_to_base_link(segment)
+
+        if transformed_segment is not None:
+            self.reference_path = self.calculate_reference_points(transformed_segment)
+            self.cx = self.reference_path[:, 0]
+            self.cy = self.reference_path[:, 1]
+            self.sp = self.reference_path[:, 2]
+            self.cyaw = self.reference_path[:, 3]
+            self.get_logger().info(f"Updated reference path: Start={start_idx}, End={end_idx}")
         else:
-            self.get_logger().warn("Failed to transform path segment.")
+            self.get_logger().warn("Failed to transform global path segment.")
 
     def local_costmap_callback(self, msg):
         # Obtain local cost map
@@ -231,29 +246,37 @@ class MPCController(Node):
         return reference_points
 
     def calculate_nearest_index(self, pind):
-        if len(self.cx) == 0 or len(self.cy) == 0:
+        if self.cx.size == 0 or self.cy.size == 0:
             self.get_logger().warn("Reference path is not populated. Cannot calculate nearest index.")
             return 0, float('inf')  # Return a default index and infinite distance
 
-        dx = [self.state[0]-icx for icx in self.cx[pind:(pind + self.N_IND_SEARCH)]]
-        dy = [self.state[1]-icx for icx in self.cx[pind:(pind + self.N_IND_SEARCH)]]
+        # Limit search to a window near the previous index
+        # search_start = max(0, pind - self.N_IND_SEARCH)
+        # search_end = min(len(self.cx), pind + self.N_IND_SEARCH)
 
+        # if search_start == search_end:
+        #     search_start = 0
+        #     search_end = len(self.cx)
+
+        dx = [self.state[0]-icx for icx in self.cx]
+        dy = [self.state[1]-icy for icy in self.cy]
         d = [idx ** 2 + idy ** 2 for (idx, idy) in zip(dx, dy)]  # calculate distance
-        min_d = min(d)    # minimum distance
-
-        ind = d.index(min_d) + pind # index of the minimum distance
-
+        
+        min_d = min(d)    # (minimum distance)^2
+        nearest_idx = d.index(min_d)
+        print(nearest_idx)
         min_d = math.sqrt(min_d)
 
-        dxl = self.cx[ind] - self.state[0]
-        dyl = self.cy[ind] - self.state[1]
+        # Check if the nearest point is in front of the car
+        dxl = self.cx[nearest_idx] - self.state[0]
+        dyl = self.cy[nearest_idx] - self.state[1]
 
-        d_yaw = self.cyaw[ind] - math.atan2(dyl, dxl)
+        d_yaw = self.cyaw[nearest_idx] - math.atan2(dyl, dxl)
         angle = (d_yaw + math.pi) % (2 * math.pi) - math.pi # 각도를 -pi ~ pi로 정규화
         if angle < 0:
             min_d *= -1
 
-        return ind, min_d
+        return nearest_idx, min_d
 
     def calculate_ref_trajectory(self, pind):
         xref = np.zeros((self.NX,self.T+1))
@@ -345,82 +368,78 @@ class MPCController(Node):
             od: Optimized steering angle inputs (shape: [T])
             ox, oy, oyaw, ov: Predicted state trajectory
         """
+        # self.get_logger().info(f"xref: {xref}")
+        # self.get_logger().info(f"xbar: {xbar}") 
+        # self.get_logger().info(f"x0: {x0}")
+        # self.get_logger().info(f"dref: {dref}")
 
         x = cvxpy.Variable((self.NX, self.T + 1))
         u = cvxpy.Variable((self.NU, self.T))
 
-        # Initialize the cost function
         cost = 0.0
         constraints = []
 
-        # Path Tracking
+        # Build cost function and constraints
         for t in range(self.T):
-            # Input cost: Penalizes the magnitude of control inputs (smooth control)
-            cost += cvxpy.quad_form(u[:, t], self.R)
-
-            # State tracking cost: Penalizes deviations from the reference trajectory
+            cost += cvxpy.quad_form(u[:, t], self.R)  # Input cost
             if t != 0:
-                cost += cvxpy.quad_form(xref[:, t] - x[:, t], self.Q)
+                cost += cvxpy.quad_form(xref[:, t] - x[:, t], self.Q)  # State cost
 
-            # System dynamics constraint: x[t+1] = A @ x[t] + B @ u[t] + C
             A, B, C = self.get_linear_model_matrix(xbar[2, t], xbar[3, t], dref[0, t])
             constraints += [x[:, t + 1] == A @ x[:, t] + B @ u[:, t] + C]
 
-            # Penalize changes in control inputs (smooth transitions)
             if t < (self.T - 1):
-                cost += cvxpy.quad_form(u[:, t + 1] - u[:, t], self.Rd)
-                constraints += [cvxpy.abs(u[1, t + 1] - u[1, t]) <=
-                                self.MAX_DSTEER * self.DT]
+                cost += cvxpy.quad_form(u[:, t + 1] - u[:, t], self.Rd)  # Smooth input
+                constraints += [cvxpy.abs(u[1, t + 1] - u[1, t]) <= self.MAX_DSTEER * self.DT]
 
-        # Terminal state cost: Penalizes final state deviations
-        cost += cvxpy.quad_form(xref[:, self.T] - x[:, self.T], self.Qf)
+        cost += cvxpy.quad_form(xref[:, self.T] - x[:, self.T], self.Qf)  # Terminal cost
+        constraints += [x[:, 0] == x0]  # Initial state constraint
+        constraints += [x[2, :] <= self.MAX_SPEED + 0.1]  # Relaxed velocity constraint
+        constraints += [x[2, :] >= self.MIN_SPEED - 0.1]
+        constraints += [cvxpy.abs(u[0, :]) <= self.MAX_ACCEL + 0.1]  # Relaxed acceleration limit
+        constraints += [cvxpy.abs(u[1, :]) <= self.MAX_STEER + 0.1]  # Relaxed steering limit
 
-        # Initial state constraint
-        constraints += [x[:, 0] == x0]
-
-        # Input constraints: Enforce physical limits on inputs
-        constraints += [x[2, :] <= self.MAX_SPEED]   # Velocity constraint
-        constraints += [x[2, :] >= self.MIN_SPEED]
-        constraints += [cvxpy.abs(u[0, :]) <= self.MAX_ACCEL]   # Acceleration limit
-        constraints += [cvxpy.abs(u[1, :]) <= self.MAX_STEER]   # Steering angle limit
-
-        # Solve the optimization problem
+        # Solve the problem
         prob = cvxpy.Problem(cvxpy.Minimize(cost), constraints)
         prob.solve(solver=cvxpy.CLARABEL, verbose=False)
 
-        # Check if the solver succeeded
+        # Handle solver results
         if prob.status == cvxpy.OPTIMAL or prob.status == cvxpy.OPTIMAL_INACCURATE:
-            ox = self.get_nparray_from_matrix(x.value[0, :])   # Predicted x trajectory
-            oy = self.get_nparray_from_matrix(x.value[1, :])   # Predicted y trajectory
-            ov = self.get_nparray_from_matrix(x.value[2, :])    # Predicted velocity
-            oyaw = self.get_nparray_from_matrix(x.value[3, :])   # Predicted yaw
-            oa = self.get_nparray_from_matrix(u.value[0, :])     # Optimized acceleration
-            odelta = self.get_nparray_from_matrix(u.value[1, :])   # Optimized steering angle
-
+            ox = self.get_nparray_from_matrix(x.value[0, :])
+            oy = self.get_nparray_from_matrix(x.value[1, :])
+            ov = self.get_nparray_from_matrix(x.value[2, :])
+            oyaw = self.get_nparray_from_matrix(x.value[3, :])
+            oa = self.get_nparray_from_matrix(u.value[0, :])
+            od = self.get_nparray_from_matrix(u.value[1, :])
         else:
-            print("Error: Cannot solve mpc..")
-            oa, odelta, ox, oy, oyaw, ov = None, None, None, None, None, None
+            self.get_logger().warn("MPC solver failed. Returning fallback controls.")
+            return None, None, None, None, None, None
 
-        return oa, odelta, ox, oy, oyaw, ov
+        return oa, od, ox, oy, oyaw, ov
     
     def iterative_linear_mpc_control(self, xref, x0, dref, oa, od):
         """
         MPC control with updating operational point iteratively
         """
-        ox, oy, oyaw, ov = None, None, None, None
 
         if oa is None or od is None:
             oa = [0.0] * self.T
             od = [0.0] * self.T
 
+        ox, oy, oyaw, ov = None, None, None, None
+
         for i in range(self.MAX_ITER):
+
             xbar = self.predict_motion(x0, xref)
             poa, pod = oa[:], od[:]
+            # Solve MPC
             oa, od, ox, oy, oyaw, ov = self.linear_mpc_control(xref, xbar, x0, dref)
+            
             du = sum(abs(oa - poa)) + sum(abs(od - pod))  # calc u change value
-            self.get_logger().info(f"Iteration {i}: Control change (du) = {du}")
+            #self.get_logger().info(f"Iteration {i}: Control change (du) = {du}")
+
             if du <= self.DU_TH:
-                self.get_logger().info(f"Converged after {i} iterations.")
+                #self.get_logger().info(f"Converged after {i} iterations.")
                 break
         else:
             print("Iterative is max iter")
@@ -458,6 +477,8 @@ class MPCController(Node):
             # Compute reference trajectory
             xref, ind, dref = self.calculate_ref_trajectory(pind)
             pind = ind
+            # self.get_logger().info(f"Current state: {self.state}")
+            # self.get_logger().info(f"First reference point: {xref[:, 0]}")
 
             # Solve MPC
             oa, od, ox, oy, oyaw, ov = self.iterative_linear_mpc_control(xref, self.state, dref, oa, od)
@@ -522,6 +543,34 @@ class MPCController(Node):
                 path_msg.poses.append(pose)
 
         self.local_path_publisher.publish(path_msg)
+
+    def publish_reference_path(self):
+        """
+        Publishes the reference path as a nav_msgs/Path message.
+        """
+        if self.reference_path is None or len(self.reference_path) == 0:
+            self.get_logger().warn("Reference path is not available. Cannot publish.")
+            return
+
+        # Create the Path message
+        path_msg = Path()
+        path_msg.header.frame_id = "map"  # Assumes reference path is in "map" frame
+        path_msg.header.stamp = self.get_clock().now().to_msg()
+
+        for point in self.reference_path:
+            pose = PoseStamped()
+            pose.header.frame_id = "map"
+            pose.header.stamp = self.get_clock().now().to_msg()
+            pose.pose.position.x = point[0]
+            pose.pose.position.y = point[1]
+            pose.pose.position.z = 0.0
+            pose.pose.orientation.z = np.sin(point[3] / 2.0)  # Convert yaw to quaternion
+            pose.pose.orientation.w = np.cos(point[3] / 2.0)
+            path_msg.poses.append(pose)
+
+        self.segment_publisher.publish(path_msg)
+        #self.get_logger().info(f"Published reference path with {len(self.reference_path)} points.")
+
 
 
 def main(args=None):
