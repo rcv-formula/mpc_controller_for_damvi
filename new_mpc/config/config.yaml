@@ -8,6 +8,7 @@ car:
   MAX_SPEED: 4.5  # maximum speed [m/s]
   MIN_SPEED: 0.1  # minimum speed [m/s]
   MAX_ACCEL: 1.0  # maximum accel [m/s^2]
+  ERPM_GAIN: 4000 # have to obtain it from vesc calibration tool
 
 # MPC parameters
 mpc:
@@ -34,3 +35,4 @@ map:
 
 control:
   CONTROL_RATE: 0.05  # 20 Hz
+  SIM_MODE: True

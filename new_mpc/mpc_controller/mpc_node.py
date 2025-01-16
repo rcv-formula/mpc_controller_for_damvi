@@ -16,7 +16,6 @@ class MPCController(Node):
 
         # Load parameters from YAML file
         self.load_config()
-        self.load_global_path(self.global_path_dir)
 
         # TF2 buffer and listener
         self.tf_buffer = tf2_ros.Buffer()
@@ -49,6 +48,8 @@ class MPCController(Node):
         self.mpc_thread = threading.Thread(target=self.run_mpc, daemon=True)
         self.mpc_thread.start()
         self.get_logger().info("MPC node started")
+
+        self.load_global_path(self.global_path_dir)
 
         # Updates at 10 Hz
         self.update_reference_path()
@@ -181,49 +182,47 @@ class MPCController(Node):
         # Obtain local cost map
         pass    
 
-    def transform_global_path_to_base_link(self, segments):
-        # Check for valid transform
-        if segments is None or len(segments) == 0:
-            self.get_logger().warn("Path segment is empty or None. Cannot transform.")
-            return None
-        try:
-            for _ in range(10):  # Retry up to 10 times
-                try:
-                    transform = self.tf_buffer.lookup_transform(
-                        "ego_racecar/base_link", 
-                        "map", 
-                        rclpy.time.Time()
-                    )
-                    break
-                except tf2_ros.TransformException as e:
-                    self.get_logger().warn(f"TF lookup failed: {e}")
-                    time.sleep(0.1)
-            else:
-                self.get_logger().error("Failed to lookup transform after multiple attempts")
-                return None
+    def transform_global_path_to_odom(self):
+        """
+        Transform the global path from the map frame to the odometry frame.
 
-            # Extract transloation and rotation from the transform
+        Returns:
+            np.ndarray: Transformed global path as an (N, 3) array.
+        """
+        if self.global_path_np is None:
+            self.get_logger().warn("Global path is not loaded. Cannot transform.")
+            return None
+
+        try:
+            transform = self.tf_buffer.lookup_transform(
+                "ego_racecar/base_link",  # Target frame (for simulation)
+                "map",   # Source frame
+                rclpy.time.Time()
+            )
+
+            # Extract translation and rotation
             translation = transform.transform.translation
             rotation = transform.transform.rotation
 
-            # Convert rotation to a transformation matrix
+            # Convert rotation to transformation matrix
             transform_matrix = quaternion_matrix([rotation.x, rotation.y, rotation.z, rotation.w])
             transform_matrix[:3, 3] = [translation.x, translation.y, translation.z]
 
-            # Transform each pose and store as NumPy array
-            num_points = segments.shape[0]
-            homogeneous_points = np.hstack((segments[:, :2], np.zeros((num_points, 1)), np.ones((num_points, 1))))
+            # Apply transformation to the global path
+            num_points = self.global_path_np.shape[0]
+            homogeneous_points = np.hstack((self.global_path_np[:, :2], np.zeros((num_points, 1)), np.ones((num_points, 1))))
             transformed_points = (transform_matrix @ homogeneous_points.T).T
 
-            # Preserve velocity and return trasnformed path
-            transformed_path = np.hstack((transformed_points[:, :2], segments[:, 2:3]))
+            # Preserve velocities and return transformed path
+            transformed_path = np.hstack((transformed_points[:, :2], self.global_path_np[:, 2:3]))
+            self.get_logger().info("Successfully transformed global path to odometry frame.")
 
             return transformed_path
         
         except Exception as e:
-            self.get_logger().error(f"Error in transform_global_path_to_base_link: {e}")
+            self.get_logger().error(f"Failed to transform global path: {e}")
             return None
-            
+        
 
     def calculate_reference_points(self, transformed_path_segment):
         # Number of Points in transformed_path
@@ -269,7 +268,7 @@ class MPCController(Node):
         dx = [self.state[0]-icx for icx in self.cx]
         dy = [self.state[1]-icy for icy in self.cy]
         d = [idx ** 2 + idy ** 2 for (idx, idy) in zip(dx, dy)]  # calculate distance
-        
+
         min_d = min(d)    # (minimum distance)^2
         nearest_idx = d.index(min_d)
         print(nearest_idx)
