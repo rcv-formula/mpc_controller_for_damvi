@@ -11,6 +11,8 @@ from geometry_msgs.msg import Quaternion
 
 from tf_transformations import euler_from_quaternion
 from tf_transformations import quaternion_matrix
+from ament_index_python.packages import get_package_share_directory
+
 
 class mapParser:
     def __init__(self, path_file_dir, node : Node):
@@ -70,7 +72,9 @@ class mapParser:
 def main(args=None):#
     rclpy.init(args=args)
     node = rclpy.create_node("testNode")
-    test_content = mapParser("/home/shin/Desktop/mpc_ws/src/mpc_controller_for_damvi/new_mpc/map/Spielberg_map.csv", node)
+    package_dir = get_package_share_directory('mpc_controller')
+    config_path = os.path.join(package_dir, 'map', 'Spielberg_map.csv')
+    test_content = mapParser(config_path, node)
     tf = tf2_ros.TransformStamped()
     tf.transform.translation.x = 1.0
     tf.transform.translation.y = 2.0
@@ -81,7 +85,7 @@ def main(args=None):#
     tf.transform.rotation._y =0.0
     tf.transform.rotation._z =0.0
 
-    for i in range (60000) :
+    for i in range (6000) :
         test_content.get_path(tf)
     print("done")
 
