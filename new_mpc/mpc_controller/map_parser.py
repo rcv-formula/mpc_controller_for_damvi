@@ -21,12 +21,12 @@ class mapParser:
         self.node = node
 
         if(torch.xpu.is_available()):
-            self.accelerrator = "xpu:0"
+            self.device = torch.device("xpu")
         elif (torch.cuda.is_available()):
-            self.accelerrator = 'cuda'
+            self.device = torch.device("cuda")
         else:
-            self.accelerrator = "cpu"
-        print("using " + self.accelerrator +" to compute")
+            self.device = torch.device("cpu")
+        print("using " + self.device.type +" to compute")
         self.__private_load_path_file()
 
     def set_path_file_dir(self, path_file_dir):
@@ -61,8 +61,8 @@ class mapParser:
     def __private_prepare_homogeneous_path(self, raw_waypoints):
         # 이 함수를 초기화나 로딩 이후 단 한 번만 호출
         path_point_count = raw_waypoints.shape[0]
-        zeros_col = torch.zeros((path_point_count, 1), device=raw_waypoints.device)
-        ones_col  = torch.ones((path_point_count, 1), device=raw_waypoints.device)
+        zeros_col = torch.zeros((path_point_count, 1), device=self.device)
+        ones_col  = torch.ones((path_point_count, 1), device=self.device)
 
         # x, y만 추출하여 z=0, w=1을 합치기
         # (N, 4) shape
@@ -81,7 +81,7 @@ class mapParser:
             return []
         self.node.get_logger().info(f"Loaded {len(waypoints)} way points from {self.path_file_dir}")
 
-        self.raw_waypoints = torch.tensor(waypoints, dtype=torch.float32, device=torch.device(self.accelerrator))
+        self.raw_waypoints = torch.tensor(waypoints, dtype=torch.float32, device=self.device)
         
         self.waypoints = self.__private_prepare_homogeneous_path(self.raw_waypoints)
         
@@ -93,7 +93,7 @@ class mapParser:
 
         transform_matrix = quaternion_matrix([rotation.x, rotation.y, rotation.z, rotation.w])
         transform_matrix[:3, 3] = [translation.x, translation.y, translation.z]
-        transform_matrix = torch.tensor(transform_matrix, dtype=torch.float32).to(self.accelerrator)
+        transform_matrix = torch.tensor(transform_matrix, dtype=torch.float32, device=self.device)
         return transform_matrix
 
 
@@ -101,8 +101,11 @@ class mapParser:
 def main(args=None):#
     rclpy.init(args=args)
     node = rclpy.create_node("testNode")
-    package_dir = get_package_share_directory('mpc_controller')
-    config_path = os.path.join(package_dir, 'map', 'Spielberg_map.csv')
+    script_path = os.path.abspath(__file__)
+    script_dir = os.path.dirname(script_path)
+    parent_dir = os.path.dirname(script_dir)
+
+    config_path = os.path.join(parent_dir, 'map', 'Spielberg_map.csv')
     test_content = mapParser(config_path, node)
     tf = tf2_ros.TransformStamped()
     tf.transform.translation.x = 1.0
@@ -116,8 +119,7 @@ def main(args=None):#
 
 
     start = time.time()
-    test_content = mapParser("/home/shin/Desktop/mpc_ws/src/mpc_controller_for_damvi/new_mpc/map/Spielberg_map.csv", node, tf)
-    for i in range (500) :
+    for i in range (3) :
         test_content.get_homogeneous_path(tf)
     end = time.time()
     print("done, "+ str(end-start) +" sec")
