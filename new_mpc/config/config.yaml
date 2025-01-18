@@ -3,30 +3,30 @@ car:
   WB: 0.315  # Wheel Base : Distance between front and rear axles [m]
   WHEEL_WIDTH: 0.22  # Width of the wheels [m]
   
-  MAX_STEER: 45 # maximum steering angle [angles]
-  MAX_DSTEER: 30 # maximum steering speed [angles/s]
-  MAX_SPEED: 4.5  # maximum speed [m/s]
-  MIN_SPEED: 0.1  # minimum speed [m/s]
-  MAX_ACCEL: 1.0  # maximum accel [m/s^2]
+  MAX_STEER: 15 # maximum steering angle [angles]
+  MAX_DSTEER: 5 # maximum steering speed [angles/s]
+  MAX_SPEED: 10.0  # maximum speed [m/s]
+  MIN_SPEED: 0.0  # minimum speed [m/s]
+  MAX_ACCEL: 5.0  # maximum accel [m/s^2]
   ERPM_GAIN: 4000 # have to obtain it from vesc calibration tool
 
 # MPC parameters
 mpc:
   NX: 4 # X = [x, y, v, yaw]
   NU: 2 # a = [accel, steer]
-  T: 10  # Prediction Horizon
+  T: 15  # Prediction Horizon
   DT: 0.1  # Time step (seconds)
   
-  N_IND_SEARCH: 10 # Search Index Number
+  N_IND_SEARCH: 50 # Search Index Number
   MAX_ITER: 3  # Max iteration
   DU_TH: 0.1  # iteration finish param
 
 # Weights
 weights:
-  Q: [1.0, 1.0, 1.0, 0.5] # Weights for state variables [x, y, v, yaw]
-  Qf: [20, 20, 2, 1]  # Terminal weights for state variables # state final matrix
-  R: [0.01, 0.1]  # Weights for control inputs [acceleration, steering_rate]
-  Rd: [0.01, 0.01] # input difference cost matrix
+  Q: [2.0, 2.0, 1.0, 1.0] # Weights for state variables [x, y, v, yaw] 	# Emphasize x, y tracking and smooth yaw
+  Qf: [2.0, 2.0, 1.0, 1.0]  # Terminal weights for state     # Emphasize terminal accuracy
+  R: [0.1, 0.05]  # Weights for control inputs 		# Penalize steering aggressiveness
+  Rd: [0.05, 0.01] # input difference cost matrix        # Penalize sudden changes in inputs
 
 # Map Resolution
 map:

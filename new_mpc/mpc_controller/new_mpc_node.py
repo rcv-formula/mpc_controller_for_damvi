@@ -76,7 +76,7 @@ class MPCController(Node):
         # MPC Weights
         weights_config = config['weights']
         self.Q = np.diag(weights_config['Q'])   # state cost matrix
-        self.Qf = self.Q  # state final matrix
+        self.Qf = np.diag(weights_config['Qf'])
         self.R = np.diag(weights_config['R'])  # input cost matrix
         self.Rd = np.diag(weights_config['Rd'])   # input difference cost matrix
 
@@ -128,6 +128,7 @@ class MPCController(Node):
                 raise ValueError("Global path CSV must have exactly 3 columns: [x, y, velocity]")
 
             self.global_path_np = waypoints
+            # self.global_path_np = np.flipud(waypoints)
             self.get_logger().info(f"Loaded {len(self.global_path_np)} way points from {self.global_path_dir}")
 
         except Exception as e:
@@ -137,6 +138,17 @@ class MPCController(Node):
         if self.global_path_np is None:
             self.get_logger().warn("Global path is not loaded. Cannot transform.")
             return None
+
+        # Load CSV only once
+        self.timer.cancel()
+
+        self.transformer()
+
+        # All parameters are initialized
+        self.mpc_thread = threading.Thread(target=self.run_mpc, daemon=True)
+        self.mpc_thread.start()
+
+    def transformer(self):
 
         for _ in range(10):
             try:
@@ -149,14 +161,9 @@ class MPCController(Node):
                 break
             except tf2_ros.TransformException as e:
                 self.get_logger().warn(f"TF lookup failed: {e}. Retrying...")
-                time.sleep(1)
         else:
             self.get_logger().error("Failed to lookup TF after multiple attempts.")
             return None
-
-        # Load CSV only once
-        self.timer.cancel()
-
         # Extract translation and rotation
         translation = transform.transform.translation
         rotation = transform.transform.rotation
@@ -177,12 +184,8 @@ class MPCController(Node):
         # populate self.cx self.cy self.sp self.cyaw
         self.calc_path_yaw()
 
-        # All parameters are initialized
-        self.mpc_thread = threading.Thread(target=self.run_mpc, daemon=True)
-        self.mpc_thread.start()
-
     def calc_path_yaw(self):
-        # calculate cyaw
+        # calculate cyaw [rad]
         
         # Number of Points in transformed_path
         num_points = self.transformed_path.shape[0]
@@ -213,7 +216,18 @@ class MPCController(Node):
         self.cx = path_points[:,0]
         self.cy = path_points[:,1]
         self.sp = path_points[:,2]
-        self.cyaw = path_points[:,3]
+        self.cyaw = path_points[:,3] # rad
+
+    def calc_global_nearest_index(self):
+        # find nearest index globally
+        dx = self.cx - self.state[0]
+        dy = self.cy - self.state[1]
+        d = dx**2 + dy**2
+
+        ind = np.argmin(d)
+        mind = math.sqrt(d[ind])
+
+        return ind, mind
 
     def calc_nearest_index(self, pind):
         # find nearest index
@@ -342,9 +356,6 @@ class MPCController(Node):
 
         cost += cvxpy.quad_form(xref[:, self.T] - x[:, self.T], self.Qf)
         
-        # 305 줄 안되면 이렇게 바꾸자.
-        # x0 = [self.state[0], self.state[1], self.state[2], self.state[3]]
-        # constraints += [x[:, 0] == x0]
         x0 = self.state
         constraints += [x[:, 0] == x0]
         constraints += [x[2, :] <= self.MAX_SPEED]
@@ -384,7 +395,6 @@ class MPCController(Node):
             xbar = self.predict_motion(xref)
             poa, pod = oa[:], od[:]
             oa, od, ox, oy, oyaw, ov = self.linear_mpc_control(xref, dref, xbar)
-            print(oa)
             du = sum(abs(oa - poa)) + sum(abs(od - pod))  # calc u change value
             if du <= self.DU_TH:
                 break
@@ -403,14 +413,17 @@ class MPCController(Node):
             self.get_logger().info("Waiting for path ...")
             time.sleep(1.0)
 
-        target_ind, _ = self.calc_nearest_index(0)
+        target_ind, min_d_ = self.calc_global_nearest_index()
 
         odelta, oa = None, None
-
+        
         while rclpy.ok():
+            self.transformer()
+            self.smooth_yaw()
             xref, target_ind, dref = self.calc_ref_trajectory(target_ind)
+            self.local_path_visualizer(xref)
+            print(target_ind)
 
-            #x0 = [state.x, state.y, state.v, state.yaw]  # current state
             oa, odelta, ox, oy, oyaw, ov = self.iterative_linear_mpc_control(oa, odelta, xref, dref)
 
             if oa is None or odelta is None:
@@ -422,7 +435,7 @@ class MPCController(Node):
                 accel, delta = oa[0], odelta[0]
 
             self.publish_control(accel, delta)
-            print("I am running")
+            
 
             # Wait for the next control cycle
             time.sleep(self.CONTROL_RATE)
@@ -435,16 +448,49 @@ class MPCController(Node):
         drive_msg.header.stamp = self.get_clock().now().to_msg()
         drive_msg.header.frame_id = "ego_racecar/base_link"
 
-        
         drive_msg.drive.steering_angle = delta
-        if self.SIM_MODE :
-            drive_msg.drive.acceleration = accel
-        else :
-            drive_msg.drive.speed = self.state[2] + accel*self.DT  # Current speed
+        drive_msg.drive.speed = self.state[2] + accel*self.DT  # Current speed
 
         self.ackm_drive_publisher.publish(drive_msg)
 
-    
+    def local_path_visualizer(self, xref):
+        path_msg = Path()
+        path_msg.header.stamp = self.get_clock().now().to_msg()
+        path_msg.header.frame_id = "ego_racecar/base_link"
+
+        for i in range(xref.shape[1]):
+            pose = PoseStamped()
+            pose.header.stamp = self.get_clock().now().to_msg()
+            pose.header.frame_id = "ego_racecar/base_link"
+            
+            # xref 데이터를 position에 매핑
+            pose.pose.position.x = xref[0,i]  # x
+            pose.pose.position.y = xref[1,i]  # y
+            pose.pose.position.z = 0.0         # z (평면이라면 0)
+
+
+            pose.pose.orientation.x = 0.0
+            pose.pose.orientation.y = 0.0
+            pose.pose.orientation.z = math.sin(xref[3, i] / 2.0)
+            pose.pose.orientation.w = math.cos(xref[3, i] / 2.0)
+            path_msg.poses.append(pose)
+        
+        self.local_path_publisher.publish(path_msg)
+
+    def smooth_yaw(self):
+        for i in range(len(self.cyaw) - 1):
+            dyaw = self.cyaw[i + 1] - self.cyaw[i]
+
+            while dyaw >= math.pi / 2.0:
+                self.cyaw[i + 1] -= math.pi * 2.0
+                dyaw = self.cyaw[i + 1] - self.cyaw[i]
+
+            while dyaw <= -math.pi / 2.0:
+                self.cyaw[i + 1] += math.pi * 2.0
+                dyaw = self.cyaw[i + 1] - self.cyaw[i]
+
+      
+
 def main(args=None):
     rclpy.init(args=args)
     node = MPCController()
