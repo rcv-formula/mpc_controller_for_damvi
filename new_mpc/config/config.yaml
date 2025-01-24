@@ -5,30 +5,37 @@ car:
   
   MAX_STEER: 45 # maximum steering angle [angles]
   MAX_DSTEER: 30 # maximum steering speed [angles/s]
-  MAX_SPEED: 4.5  # maximum speed [m/s]
-  MIN_SPEED: -1.0  # minimum speed [m/s]
-  MAX_ACCEL: 1.0  # maximum accel [m/s^2]
+  MAX_SPEED: 10.0  # maximum speed [m/s]
+  MIN_SPEED: 0.0  # minimum speed [m/s]
+  MAX_ACCEL: 5.0  # maximum accel [m/s^2]
+  ERPM_GAIN: 4000 # have to obtain it from vesc calibration tool
 
 # MPC parameters
 mpc:
   NX: 4 # X = [x, y, v, yaw]
   NU: 2 # a = [accel, steer]
   T: 10  # Prediction Horizon
-  DT: 0.1  # Time step (seconds)
+  DT: 0.02  # Time step (seconds)
   
-  N_IND_SEARCH: 10 # Search Index Number
-  MAX_ITER: 3  # Max iteration
-  DU_TH: 0.1  # iteration finish param
+  N_IND_SEARCH: 30 # Search Index Number
+  MAX_ITER: 5  # Max iteration
+  DU_TH: 0.5  # iteration finish param
+  DL: 0.25 # [m] dl 값을 더 작게 설정하면 참조 궤적의 지점 간 간격이 줄어들어 더 세밀한 경로를 생성
+        # 예시로, Horizon length가 10인데 dl이 1이면 10m 앞의 궤적까지 예측
+        # dl이 0.5m 면 5미터 앞의 궤적 예측.
 
 # Weights
 weights:
-  Q: [1.0, 1.0, 0.5, 0.5]  # Weights for state variables [x, y, v, yaw]
-  Qf: [20, 20, 2, 1]  # Terminal weights for state variables # state final matrix
-  R: [0.01, 0.01]  # Weights for control inputs [acceleration, steering_rate]
-  Rd: [0.01, 1.0] # input difference cost matrix
+  Q: [10.0, 10.0, 10.0, 15.0] # Weights for state variables [x, y, v, yaw] 	# Emphasize x, y tracking and smooth yaw
+  Qf: [10.0, 10.0, 10.0, 15.0]  # Terminal weights for state     # Emphasize terminal accuracy
+  R: [0.3, 0.5]  # Weights for control inputs 		# Penalize steering aggressiveness
+  Rd: [0.5, 0.8] # input difference cost matrix        # Penalize sudden changes in inputs
 
 # Map Resolution
 map:
   out_of_bounds_penalty: 1000
-  global_path: Spielberg_map
-        
+  global_path: 4f_floor
+
+control:
+  CONTROL_RATE: 0.1  # 10 Hz
+  SIM_MODE: True
