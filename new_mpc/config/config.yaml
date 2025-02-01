@@ -14,22 +14,22 @@ car:
 mpc:
   NX: 4 # X = [x, y, v, yaw]
   NU: 2 # a = [accel, steer]
-  T: 10  # Prediction Horizon
+  T: 15  # Prediction Horizon
   DT: 0.02  # Time step (seconds)
   
   N_IND_SEARCH: 30 # Search Index Number
   MAX_ITER: 5  # Max iteration
-  DU_TH: 0.5  # iteration finish param
-  DL: 0.25 # [m] dl 값을 더 작게 설정하면 참조 궤적의 지점 간 간격이 줄어들어 더 세밀한 경로를 생성
+  DU_TH: 0.3  # iteration finish param
+  DL: 1.0 # [m] dl 값을 더 작게 설정하면 참조 궤적의 지점 간 간격이 줄어들어 더 세밀한 경로를 생성
         # 예시로, Horizon length가 10인데 dl이 1이면 10m 앞의 궤적까지 예측
         # dl이 0.5m 면 5미터 앞의 궤적 예측.
 
 # Weights
 weights:
-  Q: [10.0, 10.0, 10.0, 15.0] # Weights for state variables [x, y, v, yaw] 	# Emphasize x, y tracking and smooth yaw
-  Qf: [10.0, 10.0, 10.0, 15.0]  # Terminal weights for state     # Emphasize terminal accuracy
-  R: [0.3, 0.5]  # Weights for control inputs 		# Penalize steering aggressiveness
-  Rd: [0.5, 0.8] # input difference cost matrix        # Penalize sudden changes in inputs
+  Q: [20.0, 20.0, 5.0, 40.0] # Weights for state variables [x, y, v, yaw] 	# Emphasize x, y tracking and smooth yaw
+  Qf: [20.0, 20.0, 5.0, 40.0]  # Terminal weights for state     # Emphasize terminal accuracy
+  R: [0.5, 0.5]  # Weights for control inputs 		# Penalize steering aggressiveness
+  Rd: [0.5, 0.5] # input difference cost matrix        # Penalize sudden changes in inputs
 
 # Map Resolution
 map:

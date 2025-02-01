@@ -26,6 +26,7 @@ setup(
         'console_scripts': [
             'mpc_node = mpc_controller.mpc_node:main',
             'new_mpc_node = mpc_controller.new_mpc_node:main',
+            'compare = mpc_controller.compare:main',
         ],
     },
 )

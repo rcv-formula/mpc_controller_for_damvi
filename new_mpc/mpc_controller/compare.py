@@ -103,8 +103,9 @@ class MPCController(Node):
 
         self.state[0] = msg.pose.pose.position.x
         self.state[1] = msg.pose.pose.position.y
-        self.state[3] = yaw
-
+        # self.state[3] = yaw
+        self.state[3] = self.normalize_angle(yaw)
+        
         if self.SIM_MODE :
             self.state[2] = msg.twist.twist.linear.x
 
@@ -161,7 +162,7 @@ class MPCController(Node):
             # Calculate reference yaw (yaw)
             dx = next_point[0] - current_point[0]
             dy = next_point[1] - current_point[1]
-            path_points[i,3] = np.arctan2(dy,dx)
+            path_points[i,3] = self.normalize_angle(np.arctan2(dy, dx))
 
         # Last point, dx dy can not be calculated
         path_points[-1,0] = self.global_path_np[-1,0]
@@ -175,48 +176,13 @@ class MPCController(Node):
         self.sp = path_points[:,2]
         self.cyaw = path_points[:,3] # rad
 
-    def transform_to_map(self):
-        # find nearest index globally
-        for _ in range(10):
-            try:
-                transform = self.tf_buffer.lookup_transform(
-                    "map",                          # Target
-                    "ego_racecar/base_link",        # Source
-                    rclpy.time.Time()
-                )
-                translation = transform.transform.translation
-                rotation = transform.transform.rotation
-
-                # 변환 매트릭스 생성
-                transform_matrix = quaternion_matrix([rotation.x, rotation.y, rotation.z, rotation.w])
-                transform_matrix[:3, 3] = [translation.x, translation.y, translation.z]
-
-                # 현재 state를 homogeneous 좌표로 변환
-                homogeneous_state = np.array([self.state[0], self.state[1], 0, 1])
-                transformed_state = transform_matrix @ homogeneous_state
-
-                # Global state 계산
-                global_x, global_y = transformed_state[:2]
-                global_yaw = self.state[3] + euler_from_quaternion([rotation.x, rotation.y, rotation.z, rotation.w])[2]
-                global_yaw = (global_yaw + np.pi) % (2 * np.pi) - np.pi  # 정규화
-
-                self.global_state = np.array([global_x, global_y, self.state[2], global_yaw])
-                break
-            except tf2_ros.TransformException as e:
-                self.get_logger().warn(f"TF lookup failed: {e}. Retrying...")
-        else:
-            self.get_logger().error("Failed to Transform to Map Frame after multiple attempts.")
-            self.global_state = None
-
     def calc_global_nearest_index(self):
 
-        self.transform_to_map()
+        if self.state is None:
+            self.get_logger().warn("State is None")
 
-        if self.global_state is None:
-            self.get_logger().warn("Global State is None")
-
-        dx = self.cx - self.global_state[0]
-        dy = self.cy - self.global_state[1]
+        dx = self.cx - self.state[0]
+        dy = self.cy - self.state[1]
         d = np.sqrt(dx**2 + dy**2)
 
         ind = np.argmin(d)
@@ -226,8 +192,8 @@ class MPCController(Node):
 
     def calc_nearest_index(self, pind):
         # find nearest index
-        dx = [self.global_state[0] - icx for icx in self.cx[pind:(pind + self.N_IND_SEARCH)]]
-        dy = [self.global_state[1] - icy for icy in self.cy[pind:(pind + self.N_IND_SEARCH)]]
+        dx = [self.state[0] - icx for icx in self.cx[pind:(pind + self.N_IND_SEARCH)]]
+        dy = [self.state[1] - icy for icy in self.cy[pind:(pind + self.N_IND_SEARCH)]]
 
         d = [idx ** 2 + idy ** 2 for (idx, idy) in zip(dx, dy)]
 
@@ -236,11 +202,11 @@ class MPCController(Node):
         ind = d.index(mind) + pind
         mind = math.sqrt(mind)
 
-        dxl = self.cx[ind] - self.global_state[0]
-        dyl = self.cy[ind] - self.global_state[1]
+        dxl = self.cx[ind] - self.state[0]
+        dyl = self.cy[ind] - self.state[1]
 
         d_yaw = self.cyaw[ind] - math.atan2(dyl, dxl)
-        angle = (d_yaw + math.pi) % (2 * math.pi) - math.pi  # 각도를 -pi ~ pi로 정규화
+        angle = self.normalize_angle(d_yaw)
         if angle < 0:
             mind *= -1
 
@@ -270,12 +236,9 @@ class MPCController(Node):
 
         for i in range(1, self.T + 1):
             travel += abs(self.state[2]) * self.DT
-            dind = int(travel / self.DL)
+            # dind = int(travel / self.DL)
             # dind = int(round(travel + self.state[2] * SPEED_FACTOR) / self.DL)
             dind = i * FIXED_INCREMENT
-            # self.get_logger().info(f"Travel: {travel}, dind: {dind}, Speed: {self.state[2]}")
-            # self.get_logger().info(f"xref: {xref[:, 0]}, Closest Path Point: ({self.cx[ind]}, {self.cy[ind]})")
-
 
             if (ind + dind) < ncourse:
                 xref[0, i] = self.cx[ind + dind]
@@ -299,10 +262,10 @@ class MPCController(Node):
             xbar[i, 0] = self.state[i]
 
         for i in range(1, self.T + 1):
-            xbar[0, i] = self.global_state[0]
-            xbar[1, i] = self.global_state[1]
-            xbar[2, i] = self.global_state[2]
-            xbar[3, i] = self.global_state[3]
+            xbar[0, i] = self.state[0]
+            xbar[1, i] = self.state[1]
+            xbar[2, i] = self.state[2]
+            xbar[3, i] = self.state[3]
 
         return xbar
 
@@ -357,7 +320,7 @@ class MPCController(Node):
 
         cost += cvxpy.quad_form(xref[:, self.T] - x[:, self.T], self.Qf)
         
-        x0 = self.global_state
+        x0 = self.state
         constraints += [x[:, 0] == x0]
         constraints += [x[2, :] <= self.MAX_SPEED]
         constraints += [x[2, :] >= self.MIN_SPEED]
@@ -426,37 +389,30 @@ class MPCController(Node):
         target_ind, min_d_ = self.calc_global_nearest_index()
         odelta, oa = None, None
 
-        # initial yaw compensation
-        if self.global_state[3] - self.cyaw[0] >= math.pi:
-            self.global_state[3] -= math.pi * 2.0
-        elif self.global_state[3] - self.cyaw[0] <= -math.pi:
-            self.global_state[3] += math.pi * 2.0
+        self.state[3] = self.normalize_angle(self.state[3])
+        self.cyaw = np.array([self.normalize_angle(yaw) for yaw in self.cyaw])
         
         self.smooth_yaw()
 
         while rclpy.ok():
-            self.transform_to_map()
 
             xref, target_ind, dref = self.calc_ref_trajectory(target_ind)
             self.local_path_visualizer(xref)
-            print(f"state : {self.state[0], self.state[1], self.state[2], self.state[3]}")
-            print(f"global_state : {self.global_state[0], self.global_state[1], self.global_state[2], self.global_state[3]}")
-            print(f"cx  : {self.cx[target_ind]}, cy  : {self.cy[target_ind]}, cyaw  : {self.cyaw[target_ind]}")
-            
-            # oa, odelta, ox, oy, oyaw, ov = self.iterative_linear_mpc_control(oa, odelta, xref, dref)
+            print(f"xref[:.0] : {xref[:,0]}, state : {self.state[0], self.state[1], self.state[2], self.state[3]}")
+            oa, odelta, ox, oy, oyaw, ov = self.iterative_linear_mpc_control(oa, odelta, xref, dref)
 
-            # if oa is None or odelta is None:
-            #     self.get_logger().warn("MPC solver failed. Using fallback controls.")
-            #     oa, odelta = [0.1] * self.T, [0.0] * self.T  # Default inputs
-            #     accel, delta = 0.1, 0.0  # Default inputs
-            # else:
-            #     accel, delta = oa[0], odelta[0]
+            if oa is None or odelta is None:
+                self.get_logger().warn("MPC solver failed. Using fallback controls.")
+                oa, odelta = [0.1] * self.T, [0.0] * self.T  # Default inputs
+                accel, delta = 0.1, 0.0  # Default inputs
+            else:
+                accel, delta = oa[0], odelta[0]
 
-            # self.publish_control(accel, delta)
+            self.publish_control(accel, delta)
 
             # # Wait for the next control cycle
-            self.global_state_visualizer()
-            time.sleep(0.1)
+            # self.state_visualizer()
+            # time.sleep(0.1)
     
     def get_nparray_from_matrix(self, x):
         return np.array(x).flatten()
@@ -494,37 +450,45 @@ class MPCController(Node):
         
         self.local_path_publisher.publish(path_msg)
 
-
-    def global_state_visualizer(self):
+    def state_visualizer(self):
 
         pose = PoseStamped()
         pose.header.stamp = self.get_clock().now().to_msg()
         pose.header.frame_id = "map"
         
         # xref 데이터를 position에 매핑
-        pose.pose.position.x = self.global_state[0]  # x
-        pose.pose.position.y = self.global_state[1]  # y
+        pose.pose.position.x = self.state[0]  # x
+        pose.pose.position.y = self.state[1]  # y
         pose.pose.position.z = 0.0         # z (평면이라면 0)
 
         pose.pose.orientation.x = 0.0
         pose.pose.orientation.y = 0.0
-        pose.pose.orientation.z = math.sin(self.global_state[3] / 2.0)
-        pose.pose.orientation.w = math.cos(self.global_state[3] / 2.0)
+        pose.pose.orientation.z = math.sin(self.state[3] / 2.0)
+        pose.pose.orientation.w = math.cos(self.state[3] / 2.0)
         
         self.global_state_publisher.publish(pose)
 
+    # def smooth_yaw(self):
+
+    #     for i in range(len(self.cyaw) - 1):
+    #         dyaw = self.cyaw[i + 1] - self.cyaw[i]
+
+    #         while dyaw >= math.pi / 2.0:
+    #             self.cyaw[i + 1] -= math.pi * 2.0
+    #             dyaw = self.cyaw[i + 1] - self.cyaw[i]
+
+    #         while dyaw <= -math.pi / 2.0:
+    #             self.cyaw[i + 1] += math.pi * 2.0
+    #             dyaw = self.cyaw[i + 1] - self.cyaw[i]
+
     def smooth_yaw(self):
-
         for i in range(len(self.cyaw) - 1):
-            dyaw = self.cyaw[i + 1] - self.cyaw[i]
+            dyaw = self.normalize_angle(self.cyaw[i + 1] - self.cyaw[i])
+            self.cyaw[i + 1] = self.cyaw[i] + dyaw
 
-            while dyaw >= math.pi:
-                self.cyaw[i + 1] -= math.pi * 2.0
-                dyaw = self.cyaw[i + 1] - self.cyaw[i]
-
-            while dyaw <= -math.pi:
-                self.cyaw[i + 1] += math.pi * 2.0
-                dyaw = self.cyaw[i + 1] - self.cyaw[i]
+    def normalize_angle(self, angle):
+    # Normalize an angle to the range [-pi, pi].
+        return (angle + math.pi) % (2 * math.pi) - math.pi
 
 def main(args=None):
     rclpy.init(args=args)
