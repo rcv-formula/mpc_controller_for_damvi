@@ -184,7 +184,7 @@ class MPCController(Node):
         dy = self.cy - self.state[1]
         d = np.sqrt(dx**2 + dy**2)
 
-        ind = np.argmin(d)
+        ind = np.argmin(d) + 2
         mind = math.sqrt(d[ind])
 
         return ind, mind
@@ -219,7 +219,8 @@ class MPCController(Node):
         ncourse = len(self.cx)
 
         ind, _ = self.calc_nearest_index(pind)
-
+        
+        ind += 1
         if pind >= ind:
             ind = pind
 
@@ -251,7 +252,9 @@ class MPCController(Node):
                 xref[2, i] = self.sp[ncourse - 1]
                 xref[3, i] = self.cyaw[ncourse - 1]
                 dref[0, i] = 0.0
-            
+        
+        ind -= 1
+
         return xref, ind, dref
     
     def predict_motion(self, xref):
