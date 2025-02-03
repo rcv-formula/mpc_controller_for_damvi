@@ -103,8 +103,7 @@ class MPCController(Node):
 
         self.state[0] = msg.pose.pose.position.x
         self.state[1] = msg.pose.pose.position.y
-        # self.state[3] = yaw
-        self.state[3] = self.normalize_angle(yaw)
+        self.state[3] = yaw
         
         if self.SIM_MODE :
             self.state[2] = msg.twist.twist.linear.x
@@ -137,13 +136,13 @@ class MPCController(Node):
         self.timer.cancel()
 
         # populate self.cx self.cy self.sp self.cyaw
-        self.calc_path_yaw()
+        self.calc_global_path()
 
         # All parameters are initialized
         self.mpc_thread = threading.Thread(target=self.run_mpc, daemon=True)
         self.mpc_thread.start()
 
-    def calc_path_yaw(self):
+    def calc_global_path(self):
         # calculate cyaw [rad]
         # Number of Points in global_path_np
         num_points = self.global_path_np.shape[0]
@@ -162,7 +161,7 @@ class MPCController(Node):
             # Calculate reference yaw (yaw)
             dx = next_point[0] - current_point[0]
             dy = next_point[1] - current_point[1]
-            path_points[i,3] = self.normalize_angle(np.arctan2(dy, dx))
+            path_points[i,3] = math.atan2(dy, dx)
 
         # Last point, dx dy can not be calculated
         path_points[-1,0] = self.global_path_np[-1,0]
@@ -206,7 +205,7 @@ class MPCController(Node):
         dyl = self.cy[ind] - self.state[1]
 
         d_yaw = self.cyaw[ind] - math.atan2(dyl, dxl)
-        angle = self.normalize_angle(d_yaw)
+        angle = self.angle_mod(d_yaw)
         if angle < 0:
             mind *= -1
 
@@ -388,9 +387,6 @@ class MPCController(Node):
 
         target_ind, min_d_ = self.calc_global_nearest_index()
         odelta, oa = None, None
-
-        self.state[3] = self.normalize_angle(self.state[3])
-        self.cyaw = np.array([self.normalize_angle(yaw) for yaw in self.cyaw])
         
         self.smooth_yaw()
 
@@ -468,27 +464,36 @@ class MPCController(Node):
         
         self.global_state_publisher.publish(pose)
 
-    # def smooth_yaw(self):
-
-    #     for i in range(len(self.cyaw) - 1):
-    #         dyaw = self.cyaw[i + 1] - self.cyaw[i]
-
-    #         while dyaw >= math.pi / 2.0:
-    #             self.cyaw[i + 1] -= math.pi * 2.0
-    #             dyaw = self.cyaw[i + 1] - self.cyaw[i]
-
-    #         while dyaw <= -math.pi / 2.0:
-    #             self.cyaw[i + 1] += math.pi * 2.0
-    #             dyaw = self.cyaw[i + 1] - self.cyaw[i]
-
     def smooth_yaw(self):
-        for i in range(len(self.cyaw) - 1):
-            dyaw = self.normalize_angle(self.cyaw[i + 1] - self.cyaw[i])
-            self.cyaw[i + 1] = self.cyaw[i] + dyaw
 
-    def normalize_angle(self, angle):
-    # Normalize an angle to the range [-pi, pi].
-        return (angle + math.pi) % (2 * math.pi) - math.pi
+        for i in range(len(self.cyaw) - 1):
+            dyaw = self.cyaw[i + 1] - self.cyaw[i]
+
+            while dyaw >= math.pi / 2.0:
+                self.cyaw[i + 1] -= 2.0 * math.pi
+                dyaw = self.cyaw[i + 1] - self.cyaw[i]
+
+            while dyaw < -math.pi / 2.0:
+                self.cyaw[i + 1] += 2.0 * math.pi
+                dyaw = self.cyaw[i + 1] - self.cyaw[i]
+        
+        self.cyaw = self.angle_mod(self.cyaw)
+
+    def angle_mod(self, x):
+
+        if isinstance(x, float):
+            is_float = True
+        else:
+            is_float = False
+
+        x = np.asarray(x).flatten()
+
+        mod_angle = (x + np.pi) % (2 * np.pi) - np.pi
+
+        if is_float:
+            return mod_angle.item()
+        else:
+            return mod_angle
 
 def main(args=None):
     rclpy.init(args=args)

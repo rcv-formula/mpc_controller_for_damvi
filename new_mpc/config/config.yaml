@@ -28,8 +28,8 @@ mpc:
 weights:
   Q: [20.0, 20.0, 5.0, 40.0] # Weights for state variables [x, y, v, yaw] 	# Emphasize x, y tracking and smooth yaw
   Qf: [20.0, 20.0, 5.0, 40.0]  # Terminal weights for state     # Emphasize terminal accuracy
-  R: [0.5, 0.5]  # Weights for control inputs 		# Penalize steering aggressiveness
-  Rd: [0.5, 0.5] # input difference cost matrix        # Penalize sudden changes in inputs
+  R: [2.0, 10.0]  # Weights for control inputs 		# Penalize steering aggressiveness
+  Rd: [0.5, 2.0] # input difference cost matrix        # Penalize sudden changes in inputs
 
 # Map Resolution
 map:
