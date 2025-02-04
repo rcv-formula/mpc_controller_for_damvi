@@ -6,7 +6,7 @@ from rclpy.node import Node
 from nav_msgs.msg import Path, Odometry, OccupancyGrid
 from geometry_msgs.msg import PoseStamped
 from ackermann_msgs.msg import AckermannDriveStamped
-from vesc_msgs.msg import VescStateStamped
+from std_msgs.msg import Float64
 from tf_transformations import euler_from_quaternion
 from tf_transformations import quaternion_matrix
 from ament_index_python.packages import get_package_share_directory
@@ -29,12 +29,11 @@ class MPCController(Node):
         # Subscriber
         self.create_subscription(Odometry, '/ego_racecar/odom', self.odom_callback, 10)
         self.create_subscription(OccupancyGrid, '/local_costmap', self.local_costmap_callback, 10)
-        self.create_subscription(VescStateStamped, '/commands/motor/speed', self.speed_callback, 10)
+        self.create_subscription(Float64, '/commands/motor/speed', self.speed_callback, 10)
 
         # Publisher
         self.local_path_publisher = self.create_publisher(Path, '/local_path', 10)
         self.ackm_drive_publisher = self.create_publisher(AckermannDriveStamped, '/drive', 10)
-        self.global_state_publisher = self.create_publisher(PoseStamped, '/global_state', 10)
 
         # load_path_csv once
         self.timer = self.create_timer(2.0, self.load_path_csv)
@@ -108,7 +107,7 @@ class MPCController(Node):
         if self.SIM_MODE :
             self.state[2] = msg.twist.twist.linear.x
 
-    def speed_callback(self, msg):
+    def speed_callback(self, msg:Float64):
         # Speed value from VESC # Real World
         if not self.SIM_MODE :
             self.state[2] = msg.state.speed / self.ERPM_GAIN
@@ -221,6 +220,7 @@ class MPCController(Node):
         ind, _ = self.calc_nearest_index(pind)
         
         ind += 1
+
         if pind >= ind:
             ind = pind
 
@@ -448,24 +448,6 @@ class MPCController(Node):
             path_msg.poses.append(pose)
         
         self.local_path_publisher.publish(path_msg)
-
-    def state_visualizer(self):
-
-        pose = PoseStamped()
-        pose.header.stamp = self.get_clock().now().to_msg()
-        pose.header.frame_id = "map"
-        
-        # xref 데이터를 position에 매핑
-        pose.pose.position.x = self.state[0]  # x
-        pose.pose.position.y = self.state[1]  # y
-        pose.pose.position.z = 0.0         # z (평면이라면 0)
-
-        pose.pose.orientation.x = 0.0
-        pose.pose.orientation.y = 0.0
-        pose.pose.orientation.z = math.sin(self.state[3] / 2.0)
-        pose.pose.orientation.w = math.cos(self.state[3] / 2.0)
-        
-        self.global_state_publisher.publish(pose)
 
     def smooth_yaw(self):
 
