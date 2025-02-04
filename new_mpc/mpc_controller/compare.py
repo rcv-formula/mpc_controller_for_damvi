@@ -86,6 +86,10 @@ class MPCController(Node):
         self.CONTROL_RATE = control_config['CONTROL_RATE']
         self.SIM_MODE = control_config['SIM_MODE']
 
+        # Warm Start
+        self.prev_oa = None
+        self.prev_odelta = None
+
     def validate_config(self, config):
         required_keys = ['car', 'mpc', 'weights', 'map']
         for key in required_keys:
@@ -389,9 +393,11 @@ class MPCController(Node):
             break
 
         target_ind, min_d_ = self.calc_global_nearest_index()
-        odelta, oa = None, None
         
-        # self.smooth_yaw()
+        oa = self.prev_oa
+        odelta = self.prev_odelta
+
+        self.smooth_yaw()
 
         while rclpy.ok():
 
@@ -406,6 +412,10 @@ class MPCController(Node):
                 accel, delta = 0.1, 0.0  # Default inputs
             else:
                 accel, delta = oa[0], odelta[0]
+
+                # For next iteration Warm Start
+                self.prev_oa = oa
+                self.prev_od = odelta
 
             self.publish_control(accel, delta)
 
