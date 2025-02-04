@@ -20,16 +20,16 @@ mpc:
   N_IND_SEARCH: 30 # Search Index Number
   MAX_ITER: 5  # Max iteration
   DU_TH: 0.3  # iteration finish param
-  DL: 1.0 # [m] dl 값을 더 작게 설정하면 참조 궤적의 지점 간 간격이 줄어들어 더 세밀한 경로를 생성
+  DL: 0.8 # [m] dl 값을 더 작게 설정하면 참조 궤적의 지점 간 간격이 줄어들어 더 세밀한 경로를 생성
         # 예시로, Horizon length가 10인데 dl이 1이면 10m 앞의 궤적까지 예측
         # dl이 0.5m 면 5미터 앞의 궤적 예측.
 
 # Weights
 weights:
-  Q: [20.0, 20.0, 5.0, 40.0] # Weights for state variables [x, y, v, yaw] 	# Emphasize x, y tracking and smooth yaw
-  Qf: [20.0, 20.0, 5.0, 40.0]  # Terminal weights for state     # Emphasize terminal accuracy
+  Q: [100.0, 100.0, 5.0, 200.0] # Weights for state variables [x, y, v, yaw] 	# Emphasize x, y tracking and smooth yaw
+  Qf: [100.0, 100.0, 5.0, 200.0]  # Terminal weights for state     # Emphasize terminal accuracy
   R: [2.0, 10.0]  # Weights for control inputs 		# Penalize steering aggressiveness
-  Rd: [0.5, 2.0] # input difference cost matrix        # Penalize sudden changes in inputs
+  Rd: [2.0, 5.0] # input difference cost matrix        # Penalize sudden changes in inputs
 
 # Map Resolution
 map:

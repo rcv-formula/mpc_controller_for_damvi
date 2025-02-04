@@ -391,7 +391,7 @@ class MPCController(Node):
         target_ind, min_d_ = self.calc_global_nearest_index()
         odelta, oa = None, None
         
-        self.smooth_yaw()
+        # self.smooth_yaw()
 
         while rclpy.ok():
 
