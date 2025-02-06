@@ -175,7 +175,7 @@ class MPCController(Node):
         # Path Point
         self.cx = path_points[:,0]
         self.cy = path_points[:,1]
-        self.sp = path_points[:,2]
+        self.sp = path_points[:,2] * 0.5 # slow down
         self.cyaw = path_points[:,3] # rad
 
     def calc_global_nearest_index(self):
