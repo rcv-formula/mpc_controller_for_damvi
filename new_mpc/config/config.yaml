@@ -15,7 +15,7 @@ mpc:
   NX: 4 # X = [x, y, v, yaw]
   NU: 2 # a = [accel, steer]
   T: 15  # Prediction Horizon
-  DT: 0.1 # Time step (seconds)
+  DT: 0.05 # Time step (seconds)
   
   N_IND_SEARCH: 30 # Search Index Number
   MAX_ITER: 5  # Max iteration
@@ -26,8 +26,8 @@ mpc:
 
 # Weights
 weights:
-  Q: [1.0, 1.0, 0.5, 5.0] # Weights for state variables [x, y, v, yaw] 	# Emphasize x, y tracking and smooth yaw
-  Qf: [1.0, 1.0, 0.5, 5.0]  # Terminal weights for state     # Emphasize terminal accuracy
+  Q: [2.0, 2.0, 0.5, 10.0] # Weights for state variables [x, y, v, yaw] 	# Emphasize x, y tracking and smooth yaw
+  Qf: [2.0, 2.0, 0.5, 10.0]  # Terminal weights for state     # Emphasize terminal accuracy
   R: [0.01, 0.5]  # Weights for control inputs 		# Penalize steering aggressiveness
   Rd: [0.01, 0.5] # input difference cost matrix        # Penalize sudden changes in inputs
 

@@ -25,6 +25,7 @@ class MPCController(Node):
         # State and Control Variables
         self.state = np.zeros(4)     # [x, y, v, yaw]
         self.control = np.zeros(2)   # [acceleration, steering_angle]
+        self.raw_yaw = 0.0 # 각도 값 비정규화
 
         # Subscriber
         self.create_subscription(Odometry, '/ego_racecar/odom', self.odom_callback, 10)
@@ -104,9 +105,23 @@ class MPCController(Node):
         orientation_list = [orientation_q.x, orientation_q.y, orientation_q.z, orientation_q.w]
         _,_, yaw = euler_from_quaternion(orientation_list)
 
+        # 비정규화 yaw
+        delta_yaw = yaw - self.state[3]  # 정규화된 yaw와 이전 yaw 차이 계산
+        if delta_yaw > math.pi:
+            delta_yaw -= 2.0 * math.pi
+        elif delta_yaw < -math.pi:
+            delta_yaw += 2.0 * math.pi
+        
+        self.raw_yaw += delta_yaw  # 정규화되지 않은 yaw 누적
+
         self.state[0] = msg.pose.pose.position.x
         self.state[1] = msg.pose.pose.position.y
-        self.state[3] = yaw
+        self.state[3] = self.raw_yaw
+
+        # 정규화된 값
+        # self.state[0] = msg.pose.pose.position.x
+        # self.state[1] = msg.pose.pose.position.y
+        # self.state[3] = yaw
         
         if self.SIM_MODE :
             self.state[2] = msg.twist.twist.linear.x
@@ -464,15 +479,17 @@ class MPCController(Node):
         for i in range(len(self.cyaw) - 1):
             dyaw = self.cyaw[i + 1] - self.cyaw[i]
 
-            while dyaw >= math.pi / 2.0:
+            while dyaw >= math.pi / 2.0 :
+            # if dyaw >= math.pi:
                 self.cyaw[i + 1] -= 2.0 * math.pi
                 dyaw = self.cyaw[i + 1] - self.cyaw[i]
 
-            while dyaw < -math.pi / 2.0:
+            while dyaw < -math.pi / 2.0 :
+            # elif dyaw < -math.pi:
                 self.cyaw[i + 1] += 2.0 * math.pi
                 dyaw = self.cyaw[i + 1] - self.cyaw[i]
         
-        self.cyaw = self.angle_mod(self.cyaw)
+        # self.cyaw = self.angle_mod(self.cyaw)
 
     def angle_mod(self, x):
 
