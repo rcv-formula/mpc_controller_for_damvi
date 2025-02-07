@@ -425,7 +425,10 @@ class MPCController(Node):
 
         self.smooth_yaw()
 
+        prev_time = 0.0
+
         while rclpy.ok():
+            time_now = time.time()
             # for infinite loop
             target_ind = target_ind % len(self.cx)
             if target_ind == 0:
@@ -449,9 +452,10 @@ class MPCController(Node):
 
             self.publish_control(accel, delta)
 
-            # # Wait for the next control cycle
-            # self.state_visualizer()
-            # time.sleep(0.1)
+            time_elasped = time_now - prev_time
+            prev_time = time_now
+
+            print(f"MPC Loop : {time_elasped} s")
     
     def get_nparray_from_matrix(self, x):
         return np.array(x).flatten()
