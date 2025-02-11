@@ -81,6 +81,7 @@ class MPCController(Node):
         map_config = config['map']
         self.out_of_bounds_penalty = map_config['out_of_bounds_penalty']
         self.global_path_dir = os.path.join(package_dir, 'map', f"{map_config['global_path']}.csv")
+        self.laps = map_config['laps']
         
         # Control
         control_config = config['control']
@@ -117,11 +118,6 @@ class MPCController(Node):
         self.state[0] = msg.pose.pose.position.x
         self.state[1] = msg.pose.pose.position.y
         self.state[3] = self.raw_yaw
-
-        # 정규화된 값
-        # self.state[0] = msg.pose.pose.position.x
-        # self.state[1] = msg.pose.pose.position.y
-        # self.state[3] = yaw
         
         if self.SIM_MODE :
             self.state[2] = msg.twist.twist.linear.x
@@ -143,7 +139,7 @@ class MPCController(Node):
                 raise ValueError("Global path CSV must have exactly 3 columns: [x, y, velocity]")
 
             self.global_path_np = waypoints
-            # self.global_path_np = np.flipud(waypoints)
+            self.init_point = waypoints
             self.get_logger().info(f"Loaded {len(self.global_path_np)} way points from {self.global_path_dir}")
 
         except Exception as e:
@@ -162,7 +158,7 @@ class MPCController(Node):
 
     def calc_global_path(self):
         # calculate cyaw [rad]
-        # Number of Points in global_path_np
+        self.global_path_np = np.tile(self.global_path_np, (self.laps, 1))
         num_points = self.global_path_np.shape[0]
         path_points = np.zeros((num_points,4)) # [x, y, v, yaw]
 
@@ -198,8 +194,8 @@ class MPCController(Node):
         if self.state is None:
             self.get_logger().warn("State is None")
 
-        dx = self.cx - self.state[0]
-        dy = self.cy - self.state[1]
+        dx = self.init_point[:,0] - self.state[0]
+        dy = self.init_point[:,1] - self.state[1]
         d = np.sqrt(dx**2 + dy**2)
 
         ind = np.argmin(d) + 2
@@ -263,30 +259,43 @@ class MPCController(Node):
                 xref[2, i] = self.sp[ind + dind]
                 xref[3, i] = self.cyaw[ind + dind]
                 dref[0, i] = 0.0
-            elif (ind + dind) > ncourse -1 :
-                new_index = (ind + dind) % ncourse -1
-                xref[0, i] = self.cx[new_index]
-                xref[1, i] = self.cy[new_index]
-                xref[2, i] = self.sp[new_index]
-                xref[3, i] = self.cyaw[new_index]
+            # 마지막 index 초과했을 때
+            else:
+                xref[0, i] = self.cx[ncourse - 1]
+                xref[1, i] = self.cy[ncourse - 1]
+                xref[2, i] = self.sp[ncourse - 1]
+                xref[3, i] = self.cyaw[ncourse - 1]
                 dref[0, i] = 0.0
-                
-                if ind == ncourse-1 :
-                    ind = 0
 
         return xref, ind, dref
     
-    def predict_motion(self, xref):
+    def predict_motion(self, xref, target_ind):
         # calcualtes xbar
         xbar = xref * 0.0
-        for i, _ in enumerate(self.state):
-            xbar[i, 0] = self.state[i]
+        xbar[:, 0] = self.state
+
+        ncourse = len(self.cx)
+
+        # # 차량 모델을 이용해 예측 (비선형 모델 적용 가능)
+        # for i in range(1, self.T + 1):
+        #     xbar[0, i] = xbar[0, i-1] + xbar[2, i-1] * self.DT * math.cos(xbar[3, i-1])
+        #     xbar[1, i] = xbar[1, i-1] + xbar[2, i-1] * self.DT * math.sin(xbar[3, i-1])
+        #     xbar[2, i] = xref[2, i-1]  # xref 속도 사용 (혹은 가속도를 이용해 업데이트)
+        #     xbar[3, i] = xbar[3, i-1] + xref[2, i-1] * self.DT * math.tan(0.0) / self.WB  # 스티어링 없음 가정 (모든 dref = 0.0)
+
+        #     if target_ind + i > ncourse -1 :
+        #         xbar[3, i] = self.angle_mod(xbar[3, i])
+
+        # for i, _ in enumerate(self.state):
+        #     xbar[i, 0] = self.state[i]
 
         for i in range(1, self.T + 1):
             xbar[0, i] = self.state[0]
             xbar[1, i] = self.state[1]
             xbar[2, i] = self.state[2]
             xbar[3, i] = self.state[3]
+            if target_ind + i > ncourse -1 :
+                xbar[3, i] = self.angle_mod(xbar[3, i])
 
         return xbar
 
@@ -365,7 +374,7 @@ class MPCController(Node):
             # oa, odelta, ox, oy, oyaw, ov = None, None, None, None, None, None
             return None, None, None, None, None, None, prob.value, prob.status
         
-    def iterative_linear_mpc_control(self, oa, od, xref, dref):
+    def iterative_linear_mpc_control(self, oa, od, xref, dref, target_ind):
         # calls predict_motion and feed it to linear_mpc_motion
         """
         MPC control with updating operational point iteratively
@@ -377,7 +386,7 @@ class MPCController(Node):
             od = [0.0] * self.T
 
         for i in range(self.MAX_ITER):
-            xbar = self.predict_motion(xref)
+            xbar = self.predict_motion(xref, target_ind)
             poa, pod = oa[:], od[:]
 
             oa, od, ox, oy, oyaw, ov, cost, solver_status = self.linear_mpc_control(xref, dref, xbar)
@@ -390,11 +399,11 @@ class MPCController(Node):
                 break
 
             du = sum(abs(oa - poa)) + sum(abs(od - pod))  # calc u change value
-
+            
             if du <= self.DU_TH:
                 break
         else:
-            print("Iterative is max iter")
+            print(f"Iterative is max iter, du = {du}")
 
         return oa, od, ox, oy, oyaw, ov
     
@@ -418,14 +427,12 @@ class MPCController(Node):
 
         while rclpy.ok():
             time_now = time.time()
-            
-            if target_ind == 0:
-                self.raw_yaw = self.angle_mod(self.raw_yaw)
 
             xref, target_ind, dref = self.calc_ref_trajectory(target_ind)
             self.local_path_visualizer(xref)
             print(f"index : {target_ind}, xref[:.0] : {xref[:,0]}, state : {self.state[0], self.state[1], self.state[2], self.state[3]}")
-            oa, odelta, ox, oy, oyaw, ov = self.iterative_linear_mpc_control(oa, odelta, xref, dref)
+
+            oa, odelta, ox, oy, oyaw, ov = self.iterative_linear_mpc_control(oa, odelta, xref, dref, target_ind)
 
             if oa is None or odelta is None:
                 self.get_logger().warn("MPC solver failed. Using fallback controls.")
