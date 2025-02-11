@@ -219,9 +219,6 @@ class MPCController(Node):
         ind = d.index(mind) + pind
         mind = math.sqrt(mind)
 
-        # for infinite loop
-        ind = ind % len(self.cx)
-
         dxl = self.cx[ind] - self.state[0]
         dyl = self.cy[ind] - self.state[1]
 
@@ -244,9 +241,6 @@ class MPCController(Node):
         if pind >= ind:
             ind = pind
 
-        # for infinite loop
-        ind = ind % ncourse
-
         xref[0, 0] = self.cx[ind]
         xref[1, 0] = self.cy[ind]
         xref[2, 0] = self.sp[ind]
@@ -263,27 +257,22 @@ class MPCController(Node):
             # dind = int(round(travel + self.state[2] * SPEED_FACTOR) / self.DL)
             dind = i * FIXED_INCREMENT
 
-            # if (ind + dind) < ncourse:
-            #     xref[0, i] = self.cx[ind + dind]
-            #     xref[1, i] = self.cy[ind + dind]
-            #     xref[2, i] = self.sp[ind + dind]
-            #     xref[3, i] = self.cyaw[ind + dind]
-            #     dref[0, i] = 0.0
-            # else:
-            #     xref[0, i] = self.cx[ncourse - 1]
-            #     xref[1, i] = self.cy[ncourse - 1]
-            #     xref[2, i] = self.sp[ncourse - 1]
-            #     xref[3, i] = self.cyaw[ncourse - 1]
-            #     dref[0, i] = 0.0
-
-            # for infinite loop
-            new_index = (ind + dind) % ncourse
-
-            xref[0, i] = self.cx[new_index]
-            xref[1, i] = self.cy[new_index]
-            xref[2, i] = self.sp[new_index]
-            xref[3, i] = self.cyaw[new_index]
-            dref[0, i] = 0.0
+            if (ind + dind) <= ncourse -1:
+                xref[0, i] = self.cx[ind + dind]
+                xref[1, i] = self.cy[ind + dind]
+                xref[2, i] = self.sp[ind + dind]
+                xref[3, i] = self.cyaw[ind + dind]
+                dref[0, i] = 0.0
+            elif (ind + dind) > ncourse -1 :
+                new_index = (ind + dind) % ncourse -1
+                xref[0, i] = self.cx[new_index]
+                xref[1, i] = self.cy[new_index]
+                xref[2, i] = self.sp[new_index]
+                xref[3, i] = self.cyaw[new_index]
+                dref[0, i] = 0.0
+                
+                if ind == ncourse-1 :
+                    ind = 0
 
         return xref, ind, dref
     
@@ -429,10 +418,9 @@ class MPCController(Node):
 
         while rclpy.ok():
             time_now = time.time()
-            # for infinite loop
-            target_ind = target_ind % len(self.cx)
+            
             if target_ind == 0:
-                self.state[3] = self.angle_mod(self.state[3])
+                self.raw_yaw = self.angle_mod(self.raw_yaw)
 
             xref, target_ind, dref = self.calc_ref_trajectory(target_ind)
             self.local_path_visualizer(xref)
