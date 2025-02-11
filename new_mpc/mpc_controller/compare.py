@@ -129,7 +129,7 @@ class MPCController(Node):
     def speed_callback(self, msg:Float64):
         # Speed value from VESC # Real World
         if not self.SIM_MODE :
-            self.state[2] = msg.state.speed / self.ERPM_GAIN
+            self.state[2] = msg.data / self.ERPM_GAIN
 
     def local_costmap_callback(self, msg):
         pass
