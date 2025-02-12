@@ -358,7 +358,7 @@ class MPCController(Node):
         constraints += [cvxpy.abs(u[1, :]) <= self.MAX_STEER]
 
         prob = cvxpy.Problem(cvxpy.Minimize(cost), constraints)
-        prob.solve(solver=cvxpy.CLARABEL, verbose=False)
+        prob.solve(solver=cvxpy.OSQP, verbose=False)
 
         if prob.status == cvxpy.OPTIMAL or prob.status == cvxpy.OPTIMAL_INACCURATE:
             ox = self.get_nparray_from_matrix(x.value[0, :])
