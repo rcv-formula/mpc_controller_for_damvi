@@ -373,7 +373,110 @@ class MPCController(Node):
             print("Error: Cannot solve mpc..")
             # oa, odelta, ox, oy, oyaw, ov = None, None, None, None, None, None
             return None, None, None, None, None, None, prob.value, prob.status
+
+    def _linear_mpc_control(self, xref, dref, xbar):
+        """
+        acados를 이용한 선형 MPC solver.
+        비용 함수: 
+            ∑_{t=0}^{T-1} [(x - xref)' Q (x - xref) + u' R u] + (x_T - xref_T)' Qf (x_T - xref_T)
+        제약 조건:
+            - 동적 모델: x_{t+1} = A_t * x_t + B_t * u_t + C_t, (각 단계별 A, B, C는 self.get_linear_model_matrix()로 계산)
+            - 속도: x[2] ∈ [MIN_SPEED, MAX_SPEED]
+            - 제어 입력: u[0] ∈ [-MAX_ACCEL, MAX_ACCEL], u[1] ∈ [-MAX_STEER, MAX_STEER]
+        """
+        # 필요한 모듈 임포트
+        from acados_template import AcadosOcp, AcadosOcpSolver, AcadosModel
+        from casadi import SX
+
+        # 모델 생성
+        model = AcadosModel()
+        model.name = 'mpc_model'
+        nx = self.NX
+        nu = self.NU
+        model.x = SX.sym('x', nx)
+        model.u = SX.sym('u', nu)
         
+        # 초기 placeholder로 t=0의 동적 모델 사용
+        A0, B0, C0 = self.get_linear_model_matrix(xbar[2, 0], xbar[3, 0], dref[0, 0])
+        model.f_discrete = A0 @ model.x + B0 @ model.u + C0
+
+        # OCP 객체 생성
+        ocp = AcadosOcp()
+        ocp.model = model
+        ocp.dims.N = self.T
+
+        # 비용 함수: linear least squares (x 오차와 u 제어 비용)
+        # 비용 출력 y = [x; u]로 정의
+        Vx = np.vstack((np.eye(nx), np.zeros((nu, nx))))
+        Vu = np.vstack((np.zeros((nx, nu)), np.eye(nu)))
+        ocp.cost.cost_type = 'linear_ls'
+        ocp.cost.cost_type_e = 'linear_ls'
+        ocp.cost.Vx = Vx
+        ocp.cost.Vu = Vu
+
+        # stage 비용: (x - xref)'Q(x - xref) + u'R u → weight 행렬은 block diagonal [Q, R]
+        W = np.block([
+            [self.Q, np.zeros((nx, nu))],
+            [np.zeros((nu, nx)), self.R]
+        ])
+        ocp.cost.W = W
+        # terminal 비용: (x - xref_T)'Qf(x - xref_T)
+        ocp.cost.W_e = self.Qf
+
+        # 상태 제약: x[2] (속도) 제한
+        ocp.constraints.lbx = np.array([-np.inf, -np.inf, self.MIN_SPEED, -np.inf])
+        ocp.constraints.ubx = np.array([ np.inf,  np.inf, self.MAX_SPEED, np.inf])
+        # 초기 상태 제약
+        ocp.constraints.x0 = self.state
+
+        # 입력 제약: u[0] (가속도), u[1] (조향각)
+        ocp.constraints.lbu = np.array([-self.MAX_ACCEL, -self.MAX_STEER])
+        ocp.constraints.ubu = np.array([ self.MAX_ACCEL,  self.MAX_STEER])
+
+        # acados OCP solver 생성 (json_file은 임시 파일로 사용 – 별도 설정 가능)
+        acados_ocp_solver = AcadosOcpSolver(ocp, json_file='acados_ocp.json')
+
+        # 각 시간 단계별로 동적 모델과 비용 참조 업데이트
+        for k in range(self.T):
+            A_k, B_k, C_k = self.get_linear_model_matrix(xbar[2, k], xbar[3, k], dref[0, k])
+            acados_ocp_solver.set(k, 'A', A_k)
+            acados_ocp_solver.set(k, 'B', B_k)
+            acados_ocp_solver.set(k, 'f0', C_k)
+            # 비용 참조: y_ref = [xref(:, k); 0] (제어 참조는 0)
+            yref_stage = np.concatenate((xref[:, k], np.zeros(nu)))
+            acados_ocp_solver.set(k, 'yref', yref_stage)
+        
+        # terminal stage 비용 참조: xref(:, T)
+        acados_ocp_solver.set(self.T, 'yref', xref[:, self.T])
+
+        # OCP 문제 풀이
+        status = acados_ocp_solver.solve()
+
+        if status != 0:
+            print("acados solver failed with status:", status)
+            return None, None, None, None, None, None, None, status
+
+        # 상태와 제어 입력 궤적 추출
+        x_solution = np.zeros((nx, self.T + 1))
+        for k in range(self.T + 1):
+            x_solution[:, k] = acados_ocp_solver.get(k, 'x')
+        u_solution = np.zeros((nu, self.T))
+        for k in range(self.T):
+            u_solution[:, k] = acados_ocp_solver.get(k, 'u')
+
+        # 상태 변수 분해 (상태: [x, y, v, yaw])
+        ox = x_solution[0, :]
+        oy = x_solution[1, :]
+        ov = x_solution[2, :]
+        oyaw = x_solution[3, :]
+        oa = u_solution[0, :]
+        odelta = u_solution[1, :]
+
+        # 비용 정보 (acados_ocp_solver.get_cost()가 지원되는 경우)
+        cost = acados_ocp_solver.get_cost() if hasattr(acados_ocp_solver, 'get_cost') else None
+
+        return oa, odelta, ox, oy, oyaw, ov, cost, status
+
     def iterative_linear_mpc_control(self, oa, od, xref, dref, target_ind):
         # calls predict_motion and feed it to linear_mpc_motion
         """
