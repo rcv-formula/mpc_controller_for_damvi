@@ -29,7 +29,7 @@ class MPCController(Node):
         self.raw_yaw = 0.0 # 각도 값 비정규화
 
         # Subscriber
-        self.create_subscription(Odometry, '/ego_racecar/odom', self.odom_callback, 10)
+        self.create_subscription(Odometry, '/odom', self.odom_callback, 10)
         self.create_subscription(OccupancyGrid, '/local_costmap', self.local_costmap_callback, 10)
         self.create_subscription(Float64, '/commands/motor/speed', self.speed_callback, 10)
 
@@ -439,10 +439,10 @@ class MPCController(Node):
     def publish_control(self, v_cmd, delta_cmd):
         drive_msg = AckermannDriveStamped()
         drive_msg.header.stamp = self.get_clock().now().to_msg()
-        drive_msg.header.frame_id = "ego_racecar/base_link"
+        drive_msg.header.frame_id = "/base_link"
 
         drive_msg.drive.steering_angle = delta_cmd
-        drive_msg.drive.speed = v_cmd  # Current speed
+        drive_msg.drive.speed = v_cmd * 0.8 # Current speed
 
         self.ackm_drive_publisher.publish(drive_msg)    
 

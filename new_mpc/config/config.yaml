@@ -34,9 +34,9 @@ weights:
 # Map Resolution
 map:
   out_of_bounds_penalty: 1000
-  global_path: new_factory
+  global_path: updated_wide_factory3.0
   laps: 5
 
 control:
   CONTROL_RATE: 0.1  # 10 Hz
-  SIM_MODE: True
+  SIM_MODE: False
