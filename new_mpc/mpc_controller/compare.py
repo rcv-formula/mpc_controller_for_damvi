@@ -8,7 +8,6 @@ from geometry_msgs.msg import PoseStamped
 from ackermann_msgs.msg import AckermannDriveStamped
 from std_msgs.msg import Float64
 from tf_transformations import euler_from_quaternion
-from tf_transformations import quaternion_matrix
 from ament_index_python.packages import get_package_share_directory
 
 import casadi as ca
@@ -66,11 +65,7 @@ class MPCController(Node):
         self.NU = mpc_config['NU'] # a = [accel, steer]
         self.T = mpc_config['T'] # Horizon Lengthspeed'] # Search Index Number
         self.DT = mpc_config['DT']  # [s] time tick
-
         self.N_IND_SEARCH = mpc_config['N_IND_SEARCH']
-        self.MAX_ITER = mpc_config['MAX_ITER']  # Max iteration
-        self.DU_TH = mpc_config['DU_TH']  # iteration finish param
-        self.DL = mpc_config['DL'] 
 
         # MPC Weights
         weights_config = config['weights']
@@ -91,8 +86,8 @@ class MPCController(Node):
         self.SIM_MODE = control_config['SIM_MODE']
 
         # Warm Start
-        self.prev_oa = None
-        self.prev_odelta = None
+        self.prev_sol_x = None
+        self.prev_sol_u = None
 
     def validate_config(self, config):
         required_keys = ['car', 'mpc', 'weights', 'map']
@@ -108,18 +103,9 @@ class MPCController(Node):
         orientation_list = [orientation_q.x, orientation_q.y, orientation_q.z, orientation_q.w]
         _,_, yaw = euler_from_quaternion(orientation_list)
 
-        # 비정규화 yaw
-        delta_yaw = yaw - self.state[3]  # 정규화된 yaw와 이전 yaw 차이 계산
-        if delta_yaw > math.pi:
-            delta_yaw -= 2.0 * math.pi
-        elif delta_yaw < -math.pi:
-            delta_yaw += 2.0 * math.pi
-        
-        self.raw_yaw += delta_yaw  # 정규화되지 않은 yaw 누적
-
         self.state[0] = msg.pose.pose.position.x
         self.state[1] = msg.pose.pose.position.y
-        self.state[3] = self.raw_yaw
+        self.state[3] = yaw
         
         if self.SIM_MODE :
             self.state[2] = msg.twist.twist.linear.x
@@ -189,7 +175,7 @@ class MPCController(Node):
         self.cx = path_points[:,0]
         self.cy = path_points[:,1]
         self.sp = path_points[:,2] * 0.5 # slow down
-        self.cyaw = path_points[:,3] # rad
+        self.cyaw = self.angle_mod(path_points[:,3]) # rad
 
     def calc_global_nearest_index(self):
 
@@ -230,8 +216,7 @@ class MPCController(Node):
     def calc_ref_trajectory(self, pind):
         # calculates xref, dref, and call calc_nearest_index
         
-        xref = np.zeros((self.NX, self.T + 1))
-        dref = np.zeros((1, self.T + 1))
+        xref = np.zeros((self.NX+1, self.T + 1))
         ncourse = len(self.cx)
 
         ind, _ = self.calc_nearest_index(pind)
@@ -243,7 +228,6 @@ class MPCController(Node):
         xref[1, 0] = self.cy[ind]
         xref[2, 0] = self.sp[ind]
         xref[3, 0] = self.cyaw[ind]
-        dref[0, 0] = 0.0  # steer operational point should be 0
 
         travel = 0.0
         SPEED_FACTOR = 0.5
@@ -260,302 +244,205 @@ class MPCController(Node):
                 xref[1, i] = self.cy[ind + dind]
                 xref[2, i] = self.sp[ind + dind]
                 xref[3, i] = self.cyaw[ind + dind]
-                dref[0, i] = 0.0
             # 마지막 index 초과했을 때
             else:
                 xref[0, i] = self.cx[ncourse - 1]
                 xref[1, i] = self.cy[ncourse - 1]
                 xref[2, i] = self.sp[ncourse - 1]
                 xref[3, i] = self.cyaw[ncourse - 1]
-                dref[0, i] = 0.0
 
-        return xref, ind, dref
-    
-    def predict_motion(self, xref, target_ind):
-        # calcualtes xbar
-        xbar = xref * 0.0
-        xbar[:, 0] = self.state
+        return xref, ind
 
-        ncourse = len(self.cx)
+    def nonlinear_mpc_control(self, xref):
+        """
+        Nonlinear MPC using CasADi + IPOPT
+        * State: [x, y, yaw]
+        * Input: [v, delta]
+        * Model: simple bicycle (no acceleration state)
+        * T-step horizon
+        * xref: shape (3, T+1) = desired [x, y, yaw] reference
+        """
 
-        # # 차량 모델을 이용해 예측 (비선형 모델 적용 가능)
-        # for i in range(1, self.T + 1):
-        #     xbar[0, i] = xbar[0, i-1] + xbar[2, i-1] * self.DT * math.cos(xbar[3, i-1])
-        #     xbar[1, i] = xbar[1, i-1] + xbar[2, i-1] * self.DT * math.sin(xbar[3, i-1])
-        #     xbar[2, i] = xref[2, i-1]  # xref 속도 사용 (혹은 가속도를 이용해 업데이트)
-        #     xbar[3, i] = xbar[3, i-1] + xref[2, i-1] * self.DT * math.tan(0.0) / self.WB  # 스티어링 없음 가정 (모든 dref = 0.0)
+        T = self.T         # 예: 예측 시간 스텝
+        DT = self.DT       # 예: 시뮬레이션 / MPC step
+        NX = self.NX             # [x, y, yaw]
+        NU = self.NU             # [v, delta]
 
-        #     if target_ind + i > ncourse -1 :
-        #         xbar[3, i] = self.angle_mod(xbar[3, i])
-
-        # for i, _ in enumerate(self.state):
-        #     xbar[i, 0] = self.state[i]
-
-        for i in range(1, self.T + 1):
-            xbar[0, i] = self.state[0]
-            xbar[1, i] = self.state[1]
-            xbar[2, i] = self.state[2]
-            xbar[3, i] = self.state[3]
-            if target_ind + i > ncourse -1 :
-                xbar[3, i] = self.angle_mod(xbar[3, i])
-
-        return xbar
-
-    def get_linear_model_matrix(self, v, phi, delta):
-        # get A B C
-        A = np.zeros((self.NX, self.NX))
-        A[0, 0] = 1.0
-        A[1, 1] = 1.0
-        A[2, 2] = 1.0
-        A[3, 3] = 1.0
-        A[0, 2] = self.DT * math.cos(phi)
-        A[0, 3] = - self.DT * v * math.sin(phi)
-        A[1, 2] = self.DT * math.sin(phi)
-        A[1, 3] = self.DT * v * math.cos(phi)
-        A[3, 2] = self.DT * math.tan(delta) / self.WB
-
-        B = np.zeros((self.NX, self.NU))
-        B[2, 0] = self.DT
-        B[3, 1] = self.DT * v / (self.WB * math.cos(delta) ** 2)
-
-        C = np.zeros(self.NX)
-        C[0] = self.DT * v * math.sin(phi) * phi
-        C[1] = - self.DT * v * math.cos(phi) * phi
-        C[3] = - self.DT * v * delta / (self.WB * math.cos(delta) ** 2)
-
-        return A, B, C
-
-    def linear_mpc_control(self, xref, dref, xbar):
-        # oa odelta as output, use ox oy oyaw osp to compare with xref for accuracy
-        # calls get_linear_model_matrix
-        x = cvxpy.Variable((self.NX, self.T + 1))
-        u = cvxpy.Variable((self.NU, self.T))
-
-        cost = 0.0
-        constraints = []
-
-        for t in range(self.T):
-            cost += cvxpy.quad_form(u[:, t], self.R)
-
-            if t != 0:
-                cost += cvxpy.quad_form(xref[:, t] - x[:, t], self.Q)
-
-            A, B, C = self.get_linear_model_matrix(
-                xbar[2, t], xbar[3, t], dref[0, t])
-            
-            constraints += [x[:, t + 1] == A @ x[:, t] + B @ u[:, t] + C]
-
-            if t < (self.T - 1):
-                cost += cvxpy.quad_form(u[:, t + 1] - u[:, t], self.Rd)
-                constraints += [cvxpy.abs(u[1, t + 1] - u[1, t]) <=
-                                self.MAX_DSTEER * self.DT]
-
-        cost += cvxpy.quad_form(xref[:, self.T] - x[:, self.T], self.Qf)
-        
-        x0 = self.state
-        constraints += [x[:, 0] == x0]
-        constraints += [x[2, :] <= self.MAX_SPEED]
-        constraints += [x[2, :] >= self.MIN_SPEED]
-        constraints += [cvxpy.abs(u[0, :]) <= self.MAX_ACCEL]
-        constraints += [cvxpy.abs(u[1, :]) <= self.MAX_STEER]
-
-        prob = cvxpy.Problem(cvxpy.Minimize(cost), constraints)
-        prob.solve(solver=cvxpy.IPOPT, verbose=False)
-
-        if prob.status == cvxpy.OPTIMAL or prob.status == cvxpy.OPTIMAL_INACCURATE:
-            ox = self.get_nparray_from_matrix(x.value[0, :])
-            oy = self.get_nparray_from_matrix(x.value[1, :])
-            ov = self.get_nparray_from_matrix(x.value[2, :])
-            oyaw = self.get_nparray_from_matrix(x.value[3, :])
-            oa = self.get_nparray_from_matrix(u.value[0, :])
-            odelta = self.get_nparray_from_matrix(u.value[1, :])
-            return oa, odelta, ox, oy, oyaw, ov, prob.value, prob.status
-            
-        else:
-            print("Error: Cannot solve mpc..")
-            # oa, odelta, ox, oy, oyaw, ov = None, None, None, None, None, None
-            return None, None, None, None, None, None, prob.value, prob.status
-    
-    def _linear_mpc_control(self, xref, dref, xbar):
-        # CasADi의 Opti 환경 생성
+        # 1) CasADi Opti 환경 생성
         opti = ca.Opti()
-        
-        # 결정 변수: x ∈ ℝ^(NX x (T+1)), u ∈ ℝ^(NU x T)
-        x = opti.variable(self.NX, self.T + 1)
-        u = opti.variable(self.NU, self.T)
-        
-        cost = 0.0
-        # 시간 축에 대해 비용과 제약 조건 설정
-        for t in range(self.T):
-            # 제어 입력 비용: u[:,t]^T * R * u[:,t]
-            cost += ca.mtimes([u[:, t].T, self.R, u[:, t]])
-            
-            if t != 0:
-                # 상태 추적 비용: (xref[:,t] - x[:,t])^T * Q * (xref[:,t] - x[:,t])
-                cost += ca.mtimes([(xref[:, t] - x[:, t]).T, self.Q, (xref[:, t] - x[:, t])])
-            
-            # 선형화된 모델 행렬 A, B, C 얻기
-            A, B, C = self.get_linear_model_matrix(xbar[2, t], xbar[3, t], dref[0, t])
-            # numpy 배열이면 CasADi DM으로 변환 (필요 시)
-            A = ca.DM(A)
-            B = ca.DM(B)
-            C = ca.DM(C)
-            
-            # 동적 시스템 제약조건: x[:, t+1] = A*x[:, t] + B*u[:, t] + C
-            opti.subject_to(x[:, t + 1] == ca.mtimes(A, x[:, t]) + ca.mtimes(B, u[:, t]) + C)
-            
-            if t < self.T - 1:
-                # 제어 변화율 비용: (u[:,t+1]-u[:,t])^T * Rd * (u[:,t+1]-u[:,t])
-                cost += ca.mtimes([(u[:, t + 1] - u[:, t]).T, self.Rd, (u[:, t + 1] - u[:, t])])
-                # 조향각 변화율 제약: |u[1, t+1]-u[1, t]| <= MAX_DSTEER * DT
-                opti.subject_to(ca.fabs(u[1, t + 1] - u[1, t]) <= self.MAX_DSTEER * self.DT)
-        
-        # 최종 상태 비용: (xref[:,T] - x[:,T])^T * Qf * (xref[:,T] - x[:,T])
-        cost += ca.mtimes([(xref[:, self.T] - x[:, self.T]).T, self.Qf, (xref[:, self.T] - x[:, self.T])])
-        
-        # 초기 상태 제약조건
-        opti.subject_to(x[:, 0] == self.state)
-        
-        # 속도 제약: MIN_SPEED <= x[2, :] <= MAX_SPEED
-        opti.subject_to(x[2, :] <= self.MAX_SPEED)
-        opti.subject_to(x[2, :] >= self.MIN_SPEED)
-        
-        # 제어 입력 제약: |u[0, :]| <= MAX_ACCEL, |u[1, :]| <= MAX_STEER
-        opti.subject_to(ca.fabs(u[0, :]) <= self.MAX_ACCEL)
-        opti.subject_to(ca.fabs(u[1, :]) <= self.MAX_STEER)
-        
-        # 목적함수 설정
-        opti.minimize(cost)
-        
-        # 옵션 (예: IPOPT 출력 억제)
-        opts = {"print_time": False, "ipopt": {
-                                                "print_level": 0,  # IPOPT의 디버깅 로그를 자세히 보기 (0~12 가능, 기본 3)
-                                                "tol": 1e-4,  # 허용 오차 완화
-                                                "acceptable_tol": 1e-3,  # 더 큰 허용 오차 허용
-                                                "max_iter": 1000,  # 이터레이션 수 증가
-                                                "linear_solver": "mumps",  # 선형 솔버 설정 (기본값)
-                                                "mu_strategy": "adaptive",  # 내부 최적화 전략을 적응형으로 변경
-                                            }
-                }
+
+        # 2) 결정변수: X (3 x (T+1)), U(2 x T)
+        X = opti.variable(NX, T+1)  # X[:, k]
+        U = opti.variable(NU, T)    # U[:, k]
+
+        # 3) 비용(cost) 초기화
+        cost_expr = 0.0
+
+        # 4) 동역학 방정식 (자전거 모델)
+        def bike_model(xk, uk):
+            # xk = [x, y, yaw], uk = [v, delta]
+            X_next = ca.vertcat(
+                xk[0] + uk[0]*ca.cos(xk[2])*DT,   # x_{k+1}
+                xk[1] + uk[0]*ca.sin(xk[2])*DT,   # y_{k+1}
+                xk[2] + (uk[0]/self.WB)*ca.tan(uk[1])*DT  # yaw_{k+1}
+            )
+            return X_next
+
+        Qpos  = self.Q[0:2, 0:2]  # 2x2
+        Qv    = self.Q[2,2]       # scalar
+        Qyaw  = self.Q[3,3]       # scalar
+
+        # 5) 비용 + 제약 설정
+        for k in range(T):
+            # (a) position error cost (x, y)
+            pos_err = X[0:2,k] - xref[0:2,k]  # shape (2,)
+            cost_expr += ca.mtimes([pos_err.T, Qpos, pos_err])
+
+            # (b) speed error cost (v)
+            v_ref   = xref[2, k]      # desired speed
+            v_cmd_k = U[0, k]         # actual commanded speed
+            speed_err = v_cmd_k - v_ref
+            cost_expr += (speed_err**2) * Qv
+
+            # (c) yaw error cost, (yaw, normalized)
+            # yaw_ref = xref[2,k], yaw_robot = X[2,k]
+            # delta_yaw = yaw_ref - yaw_robot
+            delta_yaw = xref[3,k] - X[2,k]
+            # 주기성 처리: theta_mod = atan2(sin(delta_yaw), cos(delta_yaw))
+            theta_mod = ca.atan2(ca.sin(delta_yaw), ca.cos(delta_yaw))
+            # yaw cost: theta_mod^2 * Qyaw
+            cost_expr += ( theta_mod**2 ) * Qyaw
+
+            # (d) 입력 비용
+            u_k = U[:,k]  # [v, delta]
+            cost_expr += ca.mtimes([u_k.T, self.R, u_k])
+
+            # (e) 동역학 제약: X[:,k+1] == bike_model(X[:,k], U[:,k])
+            x_next = bike_model(X[:,k], U[:,k])
+            opti.subject_to( X[:,k+1] == x_next )
+
+            # (f) 입력 변화 비용/제약
+            if k < T-1:
+                # Rd 부분
+                du = U[:,k+1] - U[:,k]
+                cost_expr += ca.mtimes([du.T, self.Rd, du])
+                # ex: 조향속도 제한
+                opti.subject_to( ( U[1,k+1] - U[1,k] ) <= self.MAX_DSTEER * DT )
+                opti.subject_to( ( U[1,k+1] - U[1,k] ) >= -self.MAX_DSTEER * DT )
+
+        # terminal cost (position)
+        pos_err_final = X[0:2, T] - xref[0:2, T]
+        cost_expr += ca.mtimes([pos_err_final.T, self.Qf[0:2, 0:2], pos_err_final])
+
+        # terminal cost (speed)
+        speed_err_final = U[0, T-1] - xref[2, T] # last input vs last speed ref
+        cost_expr += ( speed_err_final**2 ) * self.Qf[2,2]
+
+        # terminal cost (yaw)
+        delta_yaw_final   = xref[3, T] - X[2, T]
+        theta_mod_final   = ca.atan2(ca.sin(delta_yaw_final), ca.cos(delta_yaw_final))
+        cost_expr += ( theta_mod_final**2 ) * self.Qf[3,3]
+
+
+        # 6) 초기 상태 제약: X[:,0] = [self.state.x, self.state.y, self.state.yaw]
+        #    => 현재 로봇 상태가 [x0, y0, yaw0], shape (3,)
+        x_init = np.array([self.state[0], self.state[1], self.state[3]])  # [x, y, yaw] 정규화된 yaw
+        opti.subject_to( X[:,0] == x_init )
+
+        # 7) 상태/입력 범위 제약
+        # 예: v_min <= v <= v_max
+        opti.subject_to( U[0,:] >= self.MIN_SPEED )
+        opti.subject_to( U[0,:] <= self.MAX_SPEED )
+
+        # 조향각
+        opti.subject_to( ca.fabs(U[1,:]) <= self.MAX_STEER )
+
+        # 8) 목적함수 설정
+        opti.minimize( cost_expr )
+
+        # 9) Solver 옵션 (IPOPT)
+        opts = {
+            "print_time": False,
+            "ipopt": {
+                "print_level": 0,
+                "max_iter": 500,
+                "tol": 1e-2
+            }
+        }
         opti.solver("ipopt", opts)
-        
+
+        # # (warm start) - OPTIONAL
+        # if self.prev_sol_x and self.prev_sol_u is not None:
+        #     opti.set_initial(X, self.prev_sol_x)
+        #     opti.set_initial(U, self.prev_sol_u)
+
+        # 10) Solve
         try:
             sol = opti.solve()
-            
-            if sol.value(x) is None or sol.value(u) is None:
-                print("[ERROR] Solver returned None values!")
-
-            # 최적해 추출
-            x_opt = sol.value(x)
-            u_opt = sol.value(u)
-            
-            ox = self.get_nparray_from_matrix(x_opt[0, :])
-            oy = self.get_nparray_from_matrix(x_opt[1, :])
-            ov = self.get_nparray_from_matrix(x_opt[2, :])
-            oyaw = self.get_nparray_from_matrix(x_opt[3, :])
-            oa = self.get_nparray_from_matrix(u_opt[0, :])
-            odelta = self.get_nparray_from_matrix(u_opt[1, :])
-            
-            # 최적 목적 함수 값과 solver 상태
-            obj_val = sol.value(cost)
+            x_opt = sol.value(X)  # shape (3, T+1)
+            u_opt = sol.value(U)  # shape (2, T)
+            obj_val = sol.value(cost_expr)
             status = sol.stats()['return_status']
-            return oa, odelta, ox, oy, oyaw, ov, obj_val, status
-            
+
+            # 필요 시 numpy 변환
+            ox = x_opt[0,:]  # x
+            oy = x_opt[1,:]  # y
+            oyaw = x_opt[2,:] # yaw
+            ov = u_opt[0,:]  # velocity
+            odelta = u_opt[1,:]
+
+            # 첫 입력
+            v_cmd = ov[0]
+            delta_cmd = odelta[0]
+
+            print(f"[NonlinearMPC] status={status}, cost={obj_val:.3f}")
+            # # 저장해서 warm start에 쓰거나
+            # self.prev_sol_x = x_opt
+            # self.prev_sol_u = u_opt
+
+            return v_cmd, delta_cmd, ox, oy, oyaw
+
         except RuntimeError as e:
-            print("Error: Cannot solve mpc..", e)
-            return None, None, None, None, None, None, None, None
-
-    def iterative_linear_mpc_control(self, oa, od, xref, dref, target_ind):
-        # calls predict_motion and feed it to linear_mpc_motion
-        """
-        MPC control with updating operational point iteratively
-        """
-        ox, oy, oyaw, ov = None, None, None, None
-
-        if oa is None or od is None:
-            oa = [0.0] * self.T
-            od = [0.0] * self.T
-
-        for i in range(self.MAX_ITER):
-            xbar = self.predict_motion(xref, target_ind)
-            poa, pod = oa[:], od[:]
-
-            # oa, od, ox, oy, oyaw, ov, cost, solver_status = self.linear_mpc_control(xref, dref, xbar)
-            oa, od, ox, oy, oyaw, ov, cost, solver_status = self._linear_mpc_control(xref, dref, xbar)
-
-            # # --- 새로 추가할 로그
-            # if solver_status not in [cvxpy.OPTIMAL, cvxpy.OPTIMAL_INACCURATE]:
-            #     # Solver fail 시 탈출
-            #     print(f"[iter {i+1}] Solver fail: {solver_status}")
-            #     oa, od = None, None
-            #     break
-
-            du = sum(abs(oa - poa)) + sum(abs(od - pod))  # calc u change value
-            
-            if du <= self.DU_TH:
-                break
-        else:
-            print(f"Iterative is max iter, du = {du}")
-
-        return oa, od, ox, oy, oyaw, ov
+            print("[NonlinearMPC] Solve failed:", e)
+            return None, None, None, None, None
     
     def run_mpc(self):
-        # odometry topic susbcription check
-        # speed topic subscription check
-        
-        # 모든 state 가 0인 경우 여기서 스탑, csv 파일 읽고 변환을 못했으면 여기서 스탑.
+        # csv 파일 읽고 변환을 못했으면 여기서 스탑.
         while self.global_path_np is None or self.global_path_np.size == 0: 
             self.get_logger().info("No Global Path, loading CSV might not have worked properly")
             break
 
         target_ind, min_d_ = self.calc_global_nearest_index()
-        
-        oa = self.prev_oa
-        odelta = self.prev_odelta
-
         self.smooth_yaw()
-
         prev_time = 0.0
 
         while rclpy.ok():
             time_now = time.time()
 
-            xref, target_ind, dref = self.calc_ref_trajectory(target_ind)
+            xref, target_ind = self.calc_ref_trajectory(target_ind)
             self.local_path_visualizer(xref)
-            print(f"index : {target_ind}, xref[:.0] : {xref[:,0]}, state : {self.state[0], self.state[1], self.state[2], self.state[3]}")
+            v_cmd, delta_cmd, ox, oy, oyaw = self.nonlinear_mpc_control(xref)
+            print(f"index : {target_ind}, xref : {xref[:,0]} state : {self.state}]")
 
-            oa, odelta, ox, oy, oyaw, ov = self.iterative_linear_mpc_control(oa, odelta, xref, dref, target_ind)
-
-            if oa is None or odelta is None:
+            if v_cmd is None or delta_cmd is None:
                 self.get_logger().warn("MPC solver failed. Using fallback controls.")
-                oa, odelta = [0.1] * self.T, [0.0] * self.T  # Default inputs
-                accel, delta = 0.1, 0.0  # Default inputs
+                v_cmd, delta_cmd = 0.1, 0.0  # Default inputs
             else:
-                accel, delta = oa[0], odelta[0]
-                print(f"accel : {accel}, steering angle : {delta}")
-                # For next iteration Warm Start
-                self.prev_oa = oa
-                self.prev_od = odelta
-
+                print(f"velocity : {v_cmd}, steering angle : {delta_cmd}")
 
             time_elasped = time_now - prev_time
             prev_time = time_now
 
-            self.publish_control(accel, delta)
-
+            self.publish_control(v_cmd, delta_cmd)
             print(f"MPC Loop : {time_elasped} s")
     
-    def get_nparray_from_matrix(self, x):
-        return np.array(x).flatten()
-    
-    def publish_control(self, accel, delta):
+    def publish_control(self, v_cmd, delta_cmd):
         drive_msg = AckermannDriveStamped()
         drive_msg.header.stamp = self.get_clock().now().to_msg()
         drive_msg.header.frame_id = "ego_racecar/base_link"
 
-        drive_msg.drive.steering_angle = delta
-        # drive_msg.drive.speed = self.state[2] + accel*self.DT  # Current speed
-        drive_msg.drive.speed = self.state[2] + accel*self.DT  # Current speed
+        drive_msg.drive.steering_angle = delta_cmd
+        drive_msg.drive.speed = v_cmd  # Current speed
 
         self.ackm_drive_publisher.publish(drive_msg)    
 
@@ -587,12 +474,12 @@ class MPCController(Node):
         for i in range(len(self.cyaw) - 1):
             dyaw = self.cyaw[i + 1] - self.cyaw[i]
 
-            while dyaw >= math.pi / 2.0 :
+            while dyaw >= math.pi :
             # if dyaw >= math.pi:
                 self.cyaw[i + 1] -= 2.0 * math.pi
                 dyaw = self.cyaw[i + 1] - self.cyaw[i]
 
-            while dyaw < -math.pi / 2.0 :
+            while dyaw < -math.pi :
             # elif dyaw < -math.pi:
                 self.cyaw[i + 1] += 2.0 * math.pi
                 dyaw = self.cyaw[i + 1] - self.cyaw[i]
