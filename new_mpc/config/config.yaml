@@ -5,7 +5,7 @@ car:
   
   MAX_STEER: 45 # maximum steering angle [angles]
   MAX_DSTEER: 30 # maximum steering speed [angles/s]
-  MAX_SPEED: 10.0  # maximum speed [m/s]
+  MAX_SPEED: 8.0  # maximum speed [m/s]
   MIN_SPEED: -1.0  # minimum speed [m/s]
   MAX_ACCEL: 5.0  # maximum accel [m/s^2]
   ERPM_GAIN: 4000 # have to obtain it from vesc calibration tool
@@ -26,10 +26,10 @@ mpc:
 
 # Weights
 weights:
-  Q: [3.0, 3.0, 0.5, 10.0] # Weights for state variables [x, y, v, yaw] 	# Emphasize x, y tracking and smooth yaw
-  Qf: [3.0, 3.0, 0.5, 10.0]  # Terminal weights for state     # Emphasize terminal accuracy
-  R: [0.05, 3.0]  # Weights for control inputs 		# Penalize steering aggressiveness
-  Rd: [0.01, 0.5] # input difference cost matrix        # Penalize sudden changes in inputs
+  Q: [5.0, 5.0, 0.5, 10.0] # Weights for state variables [x, y, v, yaw] 	# Emphasize x, y tracking and smooth yaw
+  Qf: [5.0, 5.0, 0.5, 10.0]  # Terminal weights for state     # Emphasize terminal accuracy
+  R: [0.05, 0.8]  # Weights for control inputs 		# Penalize steering aggressiveness
+  Rd: [0.01, 0.01] # input difference cost matrix        # Penalize sudden changes in inputs
 
 # Map Resolution
 map:

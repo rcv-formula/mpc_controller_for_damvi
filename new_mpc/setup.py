@@ -15,7 +15,7 @@ setup(
         ('share/' + package_name + '/config', ['config/config.yaml']),
         ('share/' + package_name + '/map', map_files),
     ],
-    install_requires=['setuptools', 'numpy', 'cvxpy', 'pyyaml', 'tf-transformations'],
+    install_requires=['setuptools', 'numpy', 'cvxpy', 'pyyaml', 'tf-transformations', 'casadi'],
     zip_safe=True,
     maintainer='your_name',
     maintainer_email='your_email@example.com',

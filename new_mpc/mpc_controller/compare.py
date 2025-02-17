@@ -11,6 +11,8 @@ from tf_transformations import euler_from_quaternion
 from tf_transformations import quaternion_matrix
 from ament_index_python.packages import get_package_share_directory
 
+import casadi as ca
+
 class MPCController(Node):
     def __init__(self):
         super().__init__('mpc_controller')
@@ -358,7 +360,7 @@ class MPCController(Node):
         constraints += [cvxpy.abs(u[1, :]) <= self.MAX_STEER]
 
         prob = cvxpy.Problem(cvxpy.Minimize(cost), constraints)
-        prob.solve(solver=cvxpy.OSQP, verbose=False)
+        prob.solve(solver=cvxpy.IPOPT, verbose=False)
 
         if prob.status == cvxpy.OPTIMAL or prob.status == cvxpy.OPTIMAL_INACCURATE:
             ox = self.get_nparray_from_matrix(x.value[0, :])
@@ -373,109 +375,95 @@ class MPCController(Node):
             print("Error: Cannot solve mpc..")
             # oa, odelta, ox, oy, oyaw, ov = None, None, None, None, None, None
             return None, None, None, None, None, None, prob.value, prob.status
-
+    
     def _linear_mpc_control(self, xref, dref, xbar):
-        """
-        acados를 이용한 선형 MPC solver.
-        비용 함수: 
-            ∑_{t=0}^{T-1} [(x - xref)' Q (x - xref) + u' R u] + (x_T - xref_T)' Qf (x_T - xref_T)
-        제약 조건:
-            - 동적 모델: x_{t+1} = A_t * x_t + B_t * u_t + C_t, (각 단계별 A, B, C는 self.get_linear_model_matrix()로 계산)
-            - 속도: x[2] ∈ [MIN_SPEED, MAX_SPEED]
-            - 제어 입력: u[0] ∈ [-MAX_ACCEL, MAX_ACCEL], u[1] ∈ [-MAX_STEER, MAX_STEER]
-        """
-        # 필요한 모듈 임포트
-        from acados_template import AcadosOcp, AcadosOcpSolver, AcadosModel
-        from casadi import SX
-
-        # 모델 생성
-        model = AcadosModel()
-        model.name = 'mpc_model'
-        nx = self.NX
-        nu = self.NU
-        model.x = SX.sym('x', nx)
-        model.u = SX.sym('u', nu)
+        # CasADi의 Opti 환경 생성
+        opti = ca.Opti()
         
-        # 초기 placeholder로 t=0의 동적 모델 사용
-        A0, B0, C0 = self.get_linear_model_matrix(xbar[2, 0], xbar[3, 0], dref[0, 0])
-        model.f_discrete = A0 @ model.x + B0 @ model.u + C0
-
-        # OCP 객체 생성
-        ocp = AcadosOcp()
-        ocp.model = model
-        ocp.dims.N = self.T
-
-        # 비용 함수: linear least squares (x 오차와 u 제어 비용)
-        # 비용 출력 y = [x; u]로 정의
-        Vx = np.vstack((np.eye(nx), np.zeros((nu, nx))))
-        Vu = np.vstack((np.zeros((nx, nu)), np.eye(nu)))
-        ocp.cost.cost_type = 'linear_ls'
-        ocp.cost.cost_type_e = 'linear_ls'
-        ocp.cost.Vx = Vx
-        ocp.cost.Vu = Vu
-
-        # stage 비용: (x - xref)'Q(x - xref) + u'R u → weight 행렬은 block diagonal [Q, R]
-        W = np.block([
-            [self.Q, np.zeros((nx, nu))],
-            [np.zeros((nu, nx)), self.R]
-        ])
-        ocp.cost.W = W
-        # terminal 비용: (x - xref_T)'Qf(x - xref_T)
-        ocp.cost.W_e = self.Qf
-
-        # 상태 제약: x[2] (속도) 제한
-        ocp.constraints.lbx = np.array([-np.inf, -np.inf, self.MIN_SPEED, -np.inf])
-        ocp.constraints.ubx = np.array([ np.inf,  np.inf, self.MAX_SPEED, np.inf])
-        # 초기 상태 제약
-        ocp.constraints.x0 = self.state
-
-        # 입력 제약: u[0] (가속도), u[1] (조향각)
-        ocp.constraints.lbu = np.array([-self.MAX_ACCEL, -self.MAX_STEER])
-        ocp.constraints.ubu = np.array([ self.MAX_ACCEL,  self.MAX_STEER])
-
-        # acados OCP solver 생성 (json_file은 임시 파일로 사용 – 별도 설정 가능)
-        acados_ocp_solver = AcadosOcpSolver(ocp, json_file='acados_ocp.json')
-
-        # 각 시간 단계별로 동적 모델과 비용 참조 업데이트
-        for k in range(self.T):
-            A_k, B_k, C_k = self.get_linear_model_matrix(xbar[2, k], xbar[3, k], dref[0, k])
-            acados_ocp_solver.set(k, 'A', A_k)
-            acados_ocp_solver.set(k, 'B', B_k)
-            acados_ocp_solver.set(k, 'f0', C_k)
-            # 비용 참조: y_ref = [xref(:, k); 0] (제어 참조는 0)
-            yref_stage = np.concatenate((xref[:, k], np.zeros(nu)))
-            acados_ocp_solver.set(k, 'yref', yref_stage)
+        # 결정 변수: x ∈ ℝ^(NX x (T+1)), u ∈ ℝ^(NU x T)
+        x = opti.variable(self.NX, self.T + 1)
+        u = opti.variable(self.NU, self.T)
         
-        # terminal stage 비용 참조: xref(:, T)
-        acados_ocp_solver.set(self.T, 'yref', xref[:, self.T])
+        cost = 0.0
+        # 시간 축에 대해 비용과 제약 조건 설정
+        for t in range(self.T):
+            # 제어 입력 비용: u[:,t]^T * R * u[:,t]
+            cost += ca.mtimes([u[:, t].T, self.R, u[:, t]])
+            
+            if t != 0:
+                # 상태 추적 비용: (xref[:,t] - x[:,t])^T * Q * (xref[:,t] - x[:,t])
+                cost += ca.mtimes([(xref[:, t] - x[:, t]).T, self.Q, (xref[:, t] - x[:, t])])
+            
+            # 선형화된 모델 행렬 A, B, C 얻기
+            A, B, C = self.get_linear_model_matrix(xbar[2, t], xbar[3, t], dref[0, t])
+            # numpy 배열이면 CasADi DM으로 변환 (필요 시)
+            A = ca.DM(A)
+            B = ca.DM(B)
+            C = ca.DM(C)
+            
+            # 동적 시스템 제약조건: x[:, t+1] = A*x[:, t] + B*u[:, t] + C
+            opti.subject_to(x[:, t + 1] == ca.mtimes(A, x[:, t]) + ca.mtimes(B, u[:, t]) + C)
+            
+            if t < self.T - 1:
+                # 제어 변화율 비용: (u[:,t+1]-u[:,t])^T * Rd * (u[:,t+1]-u[:,t])
+                cost += ca.mtimes([(u[:, t + 1] - u[:, t]).T, self.Rd, (u[:, t + 1] - u[:, t])])
+                # 조향각 변화율 제약: |u[1, t+1]-u[1, t]| <= MAX_DSTEER * DT
+                opti.subject_to(ca.fabs(u[1, t + 1] - u[1, t]) <= self.MAX_DSTEER * self.DT)
+        
+        # 최종 상태 비용: (xref[:,T] - x[:,T])^T * Qf * (xref[:,T] - x[:,T])
+        cost += ca.mtimes([(xref[:, self.T] - x[:, self.T]).T, self.Qf, (xref[:, self.T] - x[:, self.T])])
+        
+        # 초기 상태 제약조건
+        opti.subject_to(x[:, 0] == self.state)
+        
+        # 속도 제약: MIN_SPEED <= x[2, :] <= MAX_SPEED
+        opti.subject_to(x[2, :] <= self.MAX_SPEED)
+        opti.subject_to(x[2, :] >= self.MIN_SPEED)
+        
+        # 제어 입력 제약: |u[0, :]| <= MAX_ACCEL, |u[1, :]| <= MAX_STEER
+        opti.subject_to(ca.fabs(u[0, :]) <= self.MAX_ACCEL)
+        opti.subject_to(ca.fabs(u[1, :]) <= self.MAX_STEER)
+        
+        # 목적함수 설정
+        opti.minimize(cost)
+        
+        # 옵션 (예: IPOPT 출력 억제)
+        opts = {"print_time": False, "ipopt": {
+                                                "print_level": 0,  # IPOPT의 디버깅 로그를 자세히 보기 (0~12 가능, 기본 3)
+                                                "tol": 1e-4,  # 허용 오차 완화
+                                                "acceptable_tol": 1e-3,  # 더 큰 허용 오차 허용
+                                                "max_iter": 1000,  # 이터레이션 수 증가
+                                                "linear_solver": "mumps",  # 선형 솔버 설정 (기본값)
+                                                "mu_strategy": "adaptive",  # 내부 최적화 전략을 적응형으로 변경
+                                            }
+                }
+        opti.solver("ipopt", opts)
+        
+        try:
+            sol = opti.solve()
+            
+            if sol.value(x) is None or sol.value(u) is None:
+                print("[ERROR] Solver returned None values!")
 
-        # OCP 문제 풀이
-        status = acados_ocp_solver.solve()
-
-        if status != 0:
-            print("acados solver failed with status:", status)
-            return None, None, None, None, None, None, None, status
-
-        # 상태와 제어 입력 궤적 추출
-        x_solution = np.zeros((nx, self.T + 1))
-        for k in range(self.T + 1):
-            x_solution[:, k] = acados_ocp_solver.get(k, 'x')
-        u_solution = np.zeros((nu, self.T))
-        for k in range(self.T):
-            u_solution[:, k] = acados_ocp_solver.get(k, 'u')
-
-        # 상태 변수 분해 (상태: [x, y, v, yaw])
-        ox = x_solution[0, :]
-        oy = x_solution[1, :]
-        ov = x_solution[2, :]
-        oyaw = x_solution[3, :]
-        oa = u_solution[0, :]
-        odelta = u_solution[1, :]
-
-        # 비용 정보 (acados_ocp_solver.get_cost()가 지원되는 경우)
-        cost = acados_ocp_solver.get_cost() if hasattr(acados_ocp_solver, 'get_cost') else None
-
-        return oa, odelta, ox, oy, oyaw, ov, cost, status
+            # 최적해 추출
+            x_opt = sol.value(x)
+            u_opt = sol.value(u)
+            
+            ox = self.get_nparray_from_matrix(x_opt[0, :])
+            oy = self.get_nparray_from_matrix(x_opt[1, :])
+            ov = self.get_nparray_from_matrix(x_opt[2, :])
+            oyaw = self.get_nparray_from_matrix(x_opt[3, :])
+            oa = self.get_nparray_from_matrix(u_opt[0, :])
+            odelta = self.get_nparray_from_matrix(u_opt[1, :])
+            
+            # 최적 목적 함수 값과 solver 상태
+            obj_val = sol.value(cost)
+            status = sol.stats()['return_status']
+            return oa, odelta, ox, oy, oyaw, ov, obj_val, status
+            
+        except RuntimeError as e:
+            print("Error: Cannot solve mpc..", e)
+            return None, None, None, None, None, None, None, None
 
     def iterative_linear_mpc_control(self, oa, od, xref, dref, target_ind):
         # calls predict_motion and feed it to linear_mpc_motion
@@ -492,14 +480,15 @@ class MPCController(Node):
             xbar = self.predict_motion(xref, target_ind)
             poa, pod = oa[:], od[:]
 
-            oa, od, ox, oy, oyaw, ov, cost, solver_status = self.linear_mpc_control(xref, dref, xbar)
+            # oa, od, ox, oy, oyaw, ov, cost, solver_status = self.linear_mpc_control(xref, dref, xbar)
+            oa, od, ox, oy, oyaw, ov, cost, solver_status = self._linear_mpc_control(xref, dref, xbar)
 
-            # --- 새로 추가할 로그
-            if solver_status not in [cvxpy.OPTIMAL, cvxpy.OPTIMAL_INACCURATE]:
-                # Solver fail 시 탈출
-                print(f"[iter {i+1}] Solver fail: {solver_status}")
-                oa, od = None, None
-                break
+            # # --- 새로 추가할 로그
+            # if solver_status not in [cvxpy.OPTIMAL, cvxpy.OPTIMAL_INACCURATE]:
+            #     # Solver fail 시 탈출
+            #     print(f"[iter {i+1}] Solver fail: {solver_status}")
+            #     oa, od = None, None
+            #     break
 
             du = sum(abs(oa - poa)) + sum(abs(od - pod))  # calc u change value
             
@@ -543,15 +532,16 @@ class MPCController(Node):
                 accel, delta = 0.1, 0.0  # Default inputs
             else:
                 accel, delta = oa[0], odelta[0]
-
+                print(f"accel : {accel}, steering angle : {delta}")
                 # For next iteration Warm Start
                 self.prev_oa = oa
                 self.prev_od = odelta
 
-            self.publish_control(accel, delta)
 
             time_elasped = time_now - prev_time
             prev_time = time_now
+
+            self.publish_control(accel, delta)
 
             print(f"MPC Loop : {time_elasped} s")
     
@@ -564,6 +554,7 @@ class MPCController(Node):
         drive_msg.header.frame_id = "ego_racecar/base_link"
 
         drive_msg.drive.steering_angle = delta
+        # drive_msg.drive.speed = self.state[2] + accel*self.DT  # Current speed
         drive_msg.drive.speed = self.state[2] + accel*self.DT  # Current speed
 
         self.ackm_drive_publisher.publish(drive_msg)    
