@@ -275,7 +275,7 @@ class MPCController(Node):
         # 1) CasADi Opti 환경 생성
         opti = ca.Opti()
 
-        # 2) 결정변수: X (3 x (T+1)), U(2 x T)
+        # 2) 결정변수: X (4 x (T+1)), U(2 x T)
         X = opti.variable(NX, T+1)  # X[:, k]
         U = opti.variable(NU, T)    # U[:, k]
 
@@ -286,9 +286,10 @@ class MPCController(Node):
         def bike_model(xk, uk):
             # xk = [x, y, yaw], uk = [v, delta]
             X_next = ca.vertcat(
-                xk[0] + uk[0]*ca.cos(xk[2])*DT,   # x_{k+1}
-                xk[1] + uk[0]*ca.sin(xk[2])*DT,   # y_{k+1}
-                xk[2] + (uk[0]/self.WB)*ca.tan(uk[1])*DT  # yaw_{k+1}
+                xk[0] + xk[2]*ca.cos(xk[3])*DT,   # x_{k+1} = x_k + v_k cos(yaw_k) dt
+                xk[1] + xk[2]*ca.sin(xk[3])*DT,   # y_{k+1} = y_k + v_k sin(yaw_k) dt
+                xk[2] + uk[0]*DT,                 # v_{k+1} = v_k + a_k dt
+                xk[3] + (xk[2]/self.WB)*ca.tan(uk[1])*DT  # yaw_{k+1} = yaw_k + v_k/WB * tan(delta_k) dt
             )
             return X_next
 
@@ -303,23 +304,23 @@ class MPCController(Node):
             cost_expr += ca.mtimes([pos_err.T, Qpos, pos_err])
 
             # (b) speed error cost (v)
-            v_ref   = xref[2, k]      # desired speed
-            v_cmd_k = U[0, k]         # actual commanded speed
-            speed_err = v_cmd_k - v_ref
-            cost_expr += (speed_err**2) * Qv
+            v_err = X[2,k] - xref[2,k]  # (v_k - v_ref)
+            cost_expr += (v_err**2) * Qv
 
             # (c) yaw error cost, (yaw, normalized)
             # yaw_ref = xref[2,k], yaw_robot = X[2,k]
             # delta_yaw = yaw_ref - yaw_robot
-            delta_yaw = xref[3,k] - X[2,k]
+            yaw_err = xref[3,k] - X[3,k]
             # 주기성 처리: theta_mod = atan2(sin(delta_yaw), cos(delta_yaw))
-            theta_mod = ca.atan2(ca.sin(delta_yaw), ca.cos(delta_yaw))
+            yaw_mod = ca.atan2(ca.sin(yaw_err), ca.cos(yaw_err))
             # yaw cost: theta_mod^2 * Qyaw
-            cost_expr += ( theta_mod**2 ) * Qyaw
+            cost_expr += ( yaw_mod**2 ) * Qyaw
 
-            # (d) 입력 비용
-            u_k = U[:,k]  # [v, delta]
-            cost_expr += ca.mtimes([u_k.T, self.R, u_k])
+            # (d) input cost
+            a_k     = U[0,k]
+            delta_k = U[1,k]
+            u_vec   = ca.vertcat(a_k, delta_k)
+            cost_expr += ca.mtimes([u_vec.T, self.R, u_vec])  # ex. R is 2x2
 
             # (e) 동역학 제약: X[:,k+1] == bike_model(X[:,k], U[:,k])
             x_next = bike_model(X[:,k], U[:,k])
@@ -339,27 +340,26 @@ class MPCController(Node):
         cost_expr += ca.mtimes([pos_err_final.T, self.Qf[0:2, 0:2], pos_err_final])
 
         # terminal cost (speed)
-        speed_err_final = U[0, T-1] - xref[2, T] # last input vs last speed ref
-        cost_expr += ( speed_err_final**2 ) * self.Qf[2,2]
+        v_err_final = X[2, T] - xref[2, T] # last input vs last speed ref
+        cost_expr += ( v_err_final**2 ) * self.Qf[2,2]
 
         # terminal cost (yaw)
-        delta_yaw_final   = xref[3, T] - X[2, T]
+        delta_yaw_final   = xref[3, T] - X[3, T]
         theta_mod_final   = ca.atan2(ca.sin(delta_yaw_final), ca.cos(delta_yaw_final))
         cost_expr += ( theta_mod_final**2 ) * self.Qf[3,3]
 
-
         # 6) 초기 상태 제약: X[:,0] = [self.state.x, self.state.y, self.state.yaw]
         #    => 현재 로봇 상태가 [x0, y0, yaw0], shape (3,)
-        x_init = np.array([self.state[0], self.state[1], self.state[3]])  # [x, y, yaw] 정규화된 yaw
+        x_init = np.array([self.state[0], self.state[1], self.state[2], self.state[3]])  # [x, y, yaw] 정규화된 yaw
         opti.subject_to( X[:,0] == x_init )
 
         # 7) 상태/입력 범위 제약
-        # 예: v_min <= v <= v_max
-        opti.subject_to( U[0,:] >= self.MIN_SPEED )
-        opti.subject_to( U[0,:] <= self.MAX_SPEED )
-
-        # 조향각
-        opti.subject_to( ca.fabs(U[1,:]) <= self.MAX_STEER )
+        opti.subject_to( (U[0,:]) <= self.MAX_ACCEL )
+        opti.subject_to( (U[0,:]) >= -self.MAX_ACCEL )
+        opti.subject_to( (U[1,:]) <= self.MAX_STEER )
+        opti.subject_to( (U[1,:]) >= -self.MAX_STEER )
+        opti.subject_to( X[2,:] >= self.MIN_SPEED )
+        opti.subject_to( X[2,:] <= self.MAX_SPEED )
 
         # 8) 목적함수 설정
         opti.minimize( cost_expr )
@@ -383,7 +383,7 @@ class MPCController(Node):
         # 10) Solve
         try:
             sol = opti.solve()
-            x_opt = sol.value(X)  # shape (3, T+1)
+            x_opt = sol.value(X)  # shape (4, T+1)
             u_opt = sol.value(U)  # shape (2, T)
             obj_val = sol.value(cost_expr)
             status = sol.stats()['return_status']
@@ -391,12 +391,14 @@ class MPCController(Node):
             # 필요 시 numpy 변환
             ox = x_opt[0,:]  # x
             oy = x_opt[1,:]  # y
-            oyaw = x_opt[2,:] # yaw
-            ov = u_opt[0,:]  # velocity
+            ov = x_opt[2,:]  # velocity
+            oyaw = x_opt[3,:] # yaw
+            
+            oa = u_opt[0,:]
             odelta = u_opt[1,:]
 
             # 첫 입력
-            v_cmd = ov[0]
+            a_cmd = oa[0]
             delta_cmd = odelta[0]
 
             print(f"[NonlinearMPC] status={status}, cost={obj_val:.3f}")
@@ -404,11 +406,11 @@ class MPCController(Node):
             # self.prev_sol_x = x_opt
             # self.prev_sol_u = u_opt
 
-            return v_cmd, delta_cmd, ox, oy, oyaw
+            return a_cmd, delta_cmd, ox, oy, oa ,oyaw
 
         except RuntimeError as e:
             print("[NonlinearMPC] Solve failed:", e)
-            return None, None, None, None, None
+            return None, None, None, None, None, None
     
     def run_mpc(self):
         # csv 파일 읽고 변환을 못했으면 여기서 스탑.
@@ -425,7 +427,7 @@ class MPCController(Node):
 
             xref, target_ind = self.calc_ref_trajectory(target_ind)
             self.local_path_visualizer(xref)
-            v_cmd, delta_cmd, ox, oy, oyaw = self.nonlinear_mpc_control(xref)
+            a_cmd, delta_cmd, ox, oy, oa, oyaw = self.nonlinear_mpc_control(xref)
             print(f"index : {target_ind}, xref : {xref[:,0]} state : {self.state}]")
 
             if v_cmd is None or delta_cmd is None:
@@ -440,13 +442,13 @@ class MPCController(Node):
             self.publish_control(v_cmd, delta_cmd)
             print(f"MPC Loop : {time_elasped} s")
     
-    def publish_control(self, v_cmd, delta_cmd):
+    def publish_control(self, a_cmd, delta_cmd):
         drive_msg = AckermannDriveStamped()
         drive_msg.header.stamp = self.get_clock().now().to_msg()
         drive_msg.header.frame_id = "/base_link"
 
         drive_msg.drive.steering_angle = delta_cmd
-        drive_msg.drive.speed = v_cmd # Current speed
+        drive_msg.drive.speed = self.state[2] + a_cmd * self.DT # Current speed
 
         self.ackm_drive_publisher.publish(drive_msg)    
 
