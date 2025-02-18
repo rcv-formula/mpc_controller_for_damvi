@@ -430,16 +430,16 @@ class MPCController(Node):
             a_cmd, delta_cmd, ox, oy, oa, oyaw = self.nonlinear_mpc_control(xref)
             print(f"index : {target_ind}, xref : {xref[:,0]} state : {self.state}]")
 
-            if v_cmd is None or delta_cmd is None:
+            if a_cmd is None or delta_cmd is None:
                 self.get_logger().warn("MPC solver failed. Using fallback controls.")
-                v_cmd, delta_cmd = 0.1, 0.0  # Default inputs
+                a_cmd, delta_cmd = 0.1, 0.0  # Default inputs
             else:
-                print(f"velocity : {v_cmd}, steering angle : {delta_cmd}")
+                print(f"velocity : {self.state[2]}, steering angle : {delta_cmd}")
 
             time_elasped = time_now - prev_time
             prev_time = time_now
 
-            self.publish_control(v_cmd, delta_cmd)
+            self.publish_control(a_cmd, delta_cmd)
             print(f"MPC Loop : {time_elasped} s")
     
     def publish_control(self, a_cmd, delta_cmd):
