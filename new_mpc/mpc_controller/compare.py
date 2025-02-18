@@ -1,7 +1,8 @@
-import cvxpy, yaml, time, os, math, threading
+import yaml, time, os, math, threading
 import rclpy.duration
 import rclpy, tf2_ros
 import numpy as np
+import casadi as ca
 from rclpy.node import Node
 from nav_msgs.msg import Path, Odometry, OccupancyGrid
 from geometry_msgs.msg import PoseStamped
@@ -9,8 +10,6 @@ from ackermann_msgs.msg import AckermannDriveStamped
 from std_msgs.msg import Float64
 from tf_transformations import euler_from_quaternion
 from ament_index_python.packages import get_package_share_directory
-
-import casadi as ca
 
 class MPCController(Node):
     def __init__(self):
@@ -145,8 +144,9 @@ class MPCController(Node):
         self.mpc_thread.start()
 
     def calc_global_path(self):
-        # calculate cyaw [rad]
-        self.global_path_np = np.tile(self.global_path_np, (self.laps, 1))
+
+        self.global_path_np = np.tile(self.global_path_np[:-1], (self.laps, 1))
+
         num_points = self.global_path_np.shape[0]
         path_points = np.zeros((num_points,4)) # [x, y, v, yaw]
 
@@ -174,8 +174,12 @@ class MPCController(Node):
         # Path Point
         self.cx = path_points[:,0]
         self.cy = path_points[:,1]
-        self.sp = path_points[:,2] * 0.5 # slow down
+        self.sp = path_points[:,2] # slow down
         self.cyaw = self.angle_mod(path_points[:,3]) # rad
+        
+        # # path debugging
+        # a = np.asanyarray([self.cx, self.cy, self.sp, self.cyaw])
+        # np.savetxt("foo1.csv", a.T, delimiter=",")
 
     def calc_global_nearest_index(self):
 
@@ -442,7 +446,7 @@ class MPCController(Node):
         drive_msg.header.frame_id = "/base_link"
 
         drive_msg.drive.steering_angle = delta_cmd
-        drive_msg.drive.speed = v_cmd * 0.8 # Current speed
+        drive_msg.drive.speed = v_cmd # Current speed
 
         self.ackm_drive_publisher.publish(drive_msg)    
 
