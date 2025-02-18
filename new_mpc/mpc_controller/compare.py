@@ -190,7 +190,7 @@ class MPCController(Node):
         dy = self.init_point[:,1] - self.state[1]
         d = np.sqrt(dx**2 + dy**2)
 
-        ind = np.argmin(d) + 2
+        ind = np.argmin(d)
         mind = math.sqrt(d[ind])
 
         return ind, mind
