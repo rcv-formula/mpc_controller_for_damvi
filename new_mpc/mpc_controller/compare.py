@@ -260,8 +260,8 @@ class MPCController(Node):
     def nonlinear_mpc_control(self, xref):
         """
         Nonlinear MPC using CasADi + IPOPT
-        * State: [x, y, yaw]
-        * Input: [v, delta]
+        * State: [x, y, v, yaw]
+        * Input: [a, delta]
         * Model: simple bicycle (no acceleration state)
         * T-step horizon
         * xref: shape (3, T+1) = desired [x, y, yaw] reference
@@ -269,7 +269,7 @@ class MPCController(Node):
 
         T = self.T         # 예: 예측 시간 스텝
         DT = self.DT       # 예: 시뮬레이션 / MPC step
-        NX = self.NX             # [x, y, yaw]
+        NX = self.NX             # [x, y, v, yaw]
         NU = self.NU             # [v, delta]
 
         # 1) CasADi Opti 환경 생성
@@ -448,7 +448,10 @@ class MPCController(Node):
         drive_msg.header.frame_id = "/base_link"
 
         drive_msg.drive.steering_angle = delta_cmd
-        drive_msg.drive.speed = self.state[2] + a_cmd * self.DT # Current speed
+        v_cmd = self.state[2] + a_cmd * self.DT
+        if v_cmd >= 2.4 :
+            v_cmd = 2.4
+        drive_msg.drive.speed = v_cmd # Current speed
 
         self.ackm_drive_publisher.publish(drive_msg)    
 
