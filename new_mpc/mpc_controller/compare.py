@@ -148,7 +148,7 @@ class MPCController(Node):
         self.global_path_np = np.tile(self.global_path_np[:-1], (self.laps, 1))
 
         num_points = self.global_path_np.shape[0]
-        path_points = np.zeros((num_points,4)) # [x, y, v, yaw]
+        path_points = np.zeros((num_points, self.NX)) # [x, y, vx, yaw, r]
 
         for i in range(num_points-1):
             # Current and next points
@@ -158,7 +158,7 @@ class MPCController(Node):
             # Store x and y
             path_points[i,0] = current_point[0]
             path_points[i,1] = current_point[1]
-            path_points[i,2] = current_point[2] # reference velocity
+            path_points[i,2] = current_point[2] # reference V_x
 
             # Calculate reference yaw (yaw)
             dx = next_point[0] - current_point[0]
@@ -170,7 +170,7 @@ class MPCController(Node):
         path_points[-1,1] = self.global_path_np[-1,1]
         path_points[-1,2] = self.global_path_np[-1,2] # reference velocity
         path_points[-1,3] = path_points[-2,3] if num_points > 1 else 0.0
-
+        
         # Path Point
         self.cx = path_points[:,0]
         self.cy = path_points[:,1]
@@ -275,7 +275,7 @@ class MPCController(Node):
         # 1) CasADi Opti 환경 생성
         opti = ca.Opti()
 
-        # 2) 결정변수: X (4 x (T+1)), U(2 x T)
+        # 2) 결정변수: X ( x (T+1)), U(2 x T)
         X = opti.variable(NX, T+1)  # X[:, k]
         U = opti.variable(NU, T)    # U[:, k]
 
