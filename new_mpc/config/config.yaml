@@ -12,7 +12,7 @@ car:
 
 # MPC parameters
 mpc:
-  NX: 4 # X = [x, y, yaw]
+  NX: 5 # X = [x, y, v, sin(yaw), cos(yaw)]
   NU: 2 # a = [accel, steer]
   T: 15  # Prediction Horizon
   DT: 0.05 # Time step (seconds)
@@ -26,8 +26,8 @@ mpc:
 
 # Weights
 weights:
-  Q: [5.0, 5.0, 0.5, 10.0] # Weights for state variables [x, y, v, yaw] 	# Emphasize x, y tracking and smooth yaw
-  Qf: [5.0, 5.0, 0.5, 10.0]  # Terminal weights for state     # Emphasize terminal accuracy
+  Q: [10.0, 10.0, 0.5, 10.0, 10.0] # Weights for state variables [x, y, v, sin(yaw), cos(yaw)] 	# Emphasize x, y tracking and smooth yaw
+  Qf: [5.0, 5.0, 0.5, 10.0, 10.0]  # Terminal weights for state     # Emphasize terminal accuracy
   R: [0.05, 0.8]  # Weights for control inputs 		# Penalize steering aggressiveness
   Rd: [0.01, 0.01] # input difference cost matrix        # Penalize sudden changes in inputs
 
@@ -39,4 +39,4 @@ map:
 
 control:
   CONTROL_RATE: 0.1  # 10 Hz
-  SIM_MODE: False
+  SIM_MODE: True

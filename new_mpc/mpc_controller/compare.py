@@ -23,12 +23,12 @@ class MPCController(Node):
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
         # State and Control Variables
-        self.state = np.zeros(4)     # [x, y, v, yaw]
+        self.state = np.zeros(5)     # [x, y, v, sin(yaw), cos(yaw)]
         self.control = np.zeros(2)   # [acceleration, steering_angle]
         self.raw_yaw = 0.0 # 각도 값 비정규화
 
         # Subscriber
-        self.create_subscription(Odometry, '/odom', self.odom_callback, 10)
+        self.create_subscription(Odometry, '/ego_racecar/odom', self.odom_callback, 10)
         self.create_subscription(OccupancyGrid, '/local_costmap', self.local_costmap_callback, 10)
         self.create_subscription(Float64, '/commands/motor/speed', self.speed_callback, 10)
 
@@ -104,7 +104,8 @@ class MPCController(Node):
 
         self.state[0] = msg.pose.pose.position.x
         self.state[1] = msg.pose.pose.position.y
-        self.state[3] = yaw
+        self.state[3] = np.sin(yaw)
+        self.state[4] = np.cos(yaw)
         
         if self.SIM_MODE :
             self.state[2] = msg.twist.twist.linear.x
@@ -148,7 +149,7 @@ class MPCController(Node):
         self.global_path_np = np.tile(self.global_path_np[:-1], (self.laps, 1))
 
         num_points = self.global_path_np.shape[0]
-        path_points = np.zeros((num_points,4)) # [x, y, v, yaw]
+        path_points = np.zeros((num_points, self.NX+1)) # [x, y, v, sin(yaw), cos(yaw), yaw]
 
         for i in range(num_points-1):
             # Current and next points
@@ -163,23 +164,29 @@ class MPCController(Node):
             # Calculate reference yaw (yaw)
             dx = next_point[0] - current_point[0]
             dy = next_point[1] - current_point[1]
-            path_points[i,3] = math.atan2(dy, dx)
+            path_points[i,5] = math.atan2(dy, dx)
+            path_points[i,3] = math.sin(path_points[i,5])
+            path_points[i,4] = math.cos(path_points[i,5])
 
         # Last point, dx dy can not be calculated
         path_points[-1,0] = self.global_path_np[-1,0]
         path_points[-1,1] = self.global_path_np[-1,1]
         path_points[-1,2] = self.global_path_np[-1,2] # reference velocity
-        path_points[-1,3] = path_points[-2,3] if num_points > 1 else 0.0
+        path_points[-1,3] = path_points[-2,3]  # reference sin(yaw)
+        path_points[-1,4] = path_points[-2,4]  # reference cos(yaw)
+        path_points[-1,5] = path_points[-2,5] if num_points > 1 else 0.0 # reference yaw (optional)
 
         # Path Point
         self.cx = path_points[:,0]
         self.cy = path_points[:,1]
-        self.sp = path_points[:,2] # slow down
-        self.cyaw = self.angle_mod(path_points[:,3]) # rad
+        self.sp = path_points[:,2]
+        self.sin_yaw = path_points[:,3]
+        self.cos_yaw = path_points[:,4]
+        self.cyaw = path_points[:,5]
         
-        # # path debugging
-        # a = np.asanyarray([self.cx, self.cy, self.sp, self.cyaw])
-        # np.savetxt("foo1.csv", a.T, delimiter=",")
+        # path debugging
+        a = np.asanyarray([self.cx, self.cy, self.sp, self.sin_yaw, self.cos_yaw, self.cyaw])
+        np.savetxt("foo4.csv", a.T, delimiter=",")
 
     def calc_global_nearest_index(self):
 
@@ -220,7 +227,7 @@ class MPCController(Node):
     def calc_ref_trajectory(self, pind):
         # calculates xref, dref, and call calc_nearest_index
         
-        xref = np.zeros((self.NX+1, self.T + 1))
+        xref = np.zeros((self.NX, self.T + 1))
         ncourse = len(self.cx)
 
         ind, _ = self.calc_nearest_index(pind)
@@ -228,10 +235,11 @@ class MPCController(Node):
         if pind >= ind:
             ind = pind
 
-        xref[0, 0] = self.cx[ind]
-        xref[1, 0] = self.cy[ind]
-        xref[2, 0] = self.sp[ind]
-        xref[3, 0] = self.cyaw[ind]
+        xref[0,0] = self.cx[ind]
+        xref[1,0] = self.cy[ind]
+        xref[2,0] = self.sp[ind]
+        xref[3,0] = self.sin_yaw[ind]
+        xref[4,0] = self.cos_yaw[ind]
 
         travel = 0.0
         SPEED_FACTOR = 0.5
@@ -244,38 +252,40 @@ class MPCController(Node):
             dind = i * FIXED_INCREMENT
 
             if (ind + dind) <= ncourse -1:
-                xref[0, i] = self.cx[ind + dind]
-                xref[1, i] = self.cy[ind + dind]
-                xref[2, i] = self.sp[ind + dind]
-                xref[3, i] = self.cyaw[ind + dind]
+                xref[0,i] = self.cx[ind+dind]
+                xref[1,i] = self.cy[ind+dind]
+                xref[2,i] = self.sp[ind+dind]
+                xref[3,i] = self.sin_yaw[ind+dind]
+                xref[4,i] = self.cos_yaw[ind+dind]
             # 마지막 index 초과했을 때
             else:
-                xref[0, i] = self.cx[ncourse - 1]
-                xref[1, i] = self.cy[ncourse - 1]
-                xref[2, i] = self.sp[ncourse - 1]
-                xref[3, i] = self.cyaw[ncourse - 1]
+                xref[0,i] = self.cx[ncourse-1]
+                xref[1,i] = self.cy[ncourse-1]
+                xref[2,i] = self.sp[ncourse-1]
+                xref[3,i] = self.sin_yaw[ncourse-1]
+                xref[4,i] = self.cos_yaw[ncourse-1]
 
         return xref, ind
 
     def nonlinear_mpc_control(self, xref):
         """
         Nonlinear MPC using CasADi + IPOPT
-        * State: [x, y, v, yaw]
+        * State: [x, y, v, sin(yaw), cos(yaw)]
         * Input: [a, delta]
         * Model: simple bicycle (no acceleration state)
         * T-step horizon
-        * xref: shape (3, T+1) = desired [x, y, yaw] reference
+        * xref: shape (5, T+1) = desired [x, y, v, sin(yaw), cos(yaw)] reference
         """
 
         T = self.T         # 예: 예측 시간 스텝
         DT = self.DT       # 예: 시뮬레이션 / MPC step
-        NX = self.NX             # [x, y, v, yaw]
-        NU = self.NU             # [v, delta]
+        NX = self.NX             # [x, y, v, sin(yaw), cos(yaw)]
+        NU = self.NU             # [a, delta]
 
         # 1) CasADi Opti 환경 생성
         opti = ca.Opti()
 
-        # 2) 결정변수: X (4 x (T+1)), U(2 x T)
+        # 2) 결정변수: X (5 x (T+1)), U(2 x T)
         X = opti.variable(NX, T+1)  # X[:, k]
         U = opti.variable(NU, T)    # U[:, k]
 
@@ -284,37 +294,36 @@ class MPCController(Node):
 
         # 4) 동역학 방정식 (자전거 모델)
         def bike_model(xk, uk):
-            # xk = [x, y, yaw], uk = [v, delta]
+            # xk = [x, y, v, sin(yaw), cos(yaw)], uk = [a, delta]
+            
             X_next = ca.vertcat(
-                xk[0] + xk[2]*ca.cos(xk[3])*DT,   # x_{k+1} = x_k + v_k cos(yaw_k) dt
-                xk[1] + xk[2]*ca.sin(xk[3])*DT,   # y_{k+1} = y_k + v_k sin(yaw_k) dt
+                xk[0] + xk[2]*xk[4]*DT,   # x_{k+1} = x_k + v_k cos(yaw_k) dt
+                xk[1] + xk[2]*xk[3]*DT,   # y_{k+1} = y_k + v_k sin(yaw_k) dt
                 xk[2] + uk[0]*DT,                 # v_{k+1} = v_k + a_k dt
-                xk[3] + (xk[2]/self.WB)*ca.tan(uk[1])*DT  # yaw_{k+1} = yaw_k + v_k/WB * tan(delta_k) dt
+                xk[3] + xk[4]*(xk[2] / self.WB) * ca.tan(uk[1]) * DT,
+                xk[4] - xk[3]*(xk[2] / self.WB) * ca.tan(uk[1]) * DT
             )
             return X_next
 
         Qpos  = self.Q[0:2, 0:2]  # 2x2
         Qv    = self.Q[2,2]       # scalar
-        Qyaw  = self.Q[3,3]       # scalar
+        Q_sin  = self.Q[3,3]       # scalar
+        Q_cos  = self.Q[4,4]       # scalar
 
         # 5) 비용 + 제약 설정
         for k in range(T):
             # (a) position error cost (x, y)
             pos_err = X[0:2,k] - xref[0:2,k]  # shape (2,)
             cost_expr += ca.mtimes([pos_err.T, Qpos, pos_err])
-
+            
             # (b) speed error cost (v)
             v_err = X[2,k] - xref[2,k]  # (v_k - v_ref)
             cost_expr += (v_err**2) * Qv
 
-            # (c) yaw error cost, (yaw, normalized)
-            # yaw_ref = xref[2,k], yaw_robot = X[2,k]
-            # delta_yaw = yaw_ref - yaw_robot
-            yaw_err = xref[3,k] - X[3,k]
-            # 주기성 처리: theta_mod = atan2(sin(delta_yaw), cos(delta_yaw))
-            yaw_mod = ca.atan2(ca.sin(yaw_err), ca.cos(yaw_err))
-            # yaw cost: theta_mod^2 * Qyaw
-            cost_expr += ( yaw_mod**2 ) * Qyaw
+            # (c) yaw(방향) 오차 비용 --> sin, cos를 직접 비교
+            sin_err = X[3,k] - xref[3,k]
+            cos_err = X[4,k] - xref[4,k]
+            cost_expr += Q_sin * (sin_err**2) + Q_cos * (cos_err**2)
 
             # (d) input cost
             a_k     = U[0,k]
@@ -335,7 +344,7 @@ class MPCController(Node):
                 opti.subject_to( ( U[1,k+1] - U[1,k] ) <= self.MAX_DSTEER * DT )
                 opti.subject_to( ( U[1,k+1] - U[1,k] ) >= -self.MAX_DSTEER * DT )
 
-        # terminal cost (position)
+        # 6) terminal cost (position)
         pos_err_final = X[0:2, T] - xref[0:2, T]
         cost_expr += ca.mtimes([pos_err_final.T, self.Qf[0:2, 0:2], pos_err_final])
 
@@ -343,14 +352,15 @@ class MPCController(Node):
         v_err_final = X[2, T] - xref[2, T] # last input vs last speed ref
         cost_expr += ( v_err_final**2 ) * self.Qf[2,2]
 
-        # terminal cost (yaw)
-        delta_yaw_final   = xref[3, T] - X[3, T]
-        theta_mod_final   = ca.atan2(ca.sin(delta_yaw_final), ca.cos(delta_yaw_final))
-        cost_expr += ( theta_mod_final**2 ) * self.Qf[3,3]
+        # yaw - sin, cos의 터미널 비용
+        sin_err_final = X[3, T] - xref[3, T]
+        cos_err_final = X[4, T] - xref[4, T]
+        cost_expr += (sin_err_final**2) * self.Qf[3,3]
+        cost_expr += (cos_err_final**2) * self.Qf[4,4]
 
-        # 6) 초기 상태 제약: X[:,0] = [self.state.x, self.state.y, self.state.yaw]
-        #    => 현재 로봇 상태가 [x0, y0, yaw0], shape (3,)
-        x_init = np.array([self.state[0], self.state[1], self.state[2], self.state[3]])  # [x, y, yaw] 정규화된 yaw
+        # 7) 초기 상태 제약: X[:,0] = [self.state.x, self.state.y, self.state.v, self.state.yaw]
+        #    => 현재 로봇 상태가 [x0, y0, v0, yaw0], shape (4,)
+        x_init = np.array([self.state[0], self.state[1], self.state[2], self.state[3], self.state[4]])  # [x, y, v, sin(yaw), cos(yaw)]
         opti.subject_to( X[:,0] == x_init )
 
         # 7) 상태/입력 범위 제약
@@ -361,10 +371,10 @@ class MPCController(Node):
         opti.subject_to( X[2,:] >= self.MIN_SPEED )
         opti.subject_to( X[2,:] <= self.MAX_SPEED )
 
-        # 8) 목적함수 설정
+        # 9) 목적함수 설정
         opti.minimize( cost_expr )
 
-        # 9) Solver 옵션 (IPOPT)
+        # 10) Solver 옵션 (IPOPT)
         opts = {
             "print_time": False,
             "ipopt": {
@@ -375,12 +385,12 @@ class MPCController(Node):
         }
         opti.solver("ipopt", opts)
 
-        # # (warm start) - OPTIONAL
-        # if self.prev_sol_x and self.prev_sol_u is not None:
+        # # # (warm start) - OPTIONAL
+        # if self.prev_sol_x is not None:
         #     opti.set_initial(X, self.prev_sol_x)
         #     opti.set_initial(U, self.prev_sol_u)
 
-        # 10) Solve
+        # 11) Solve
         try:
             sol = opti.solve()
             x_opt = sol.value(X)  # shape (4, T+1)
@@ -388,11 +398,13 @@ class MPCController(Node):
             obj_val = sol.value(cost_expr)
             status = sol.stats()['return_status']
 
+            print(f"[NonlinearMPC] status={status}, cost={obj_val:.3f}")
+
             # 필요 시 numpy 변환
             ox = x_opt[0,:]  # x
             oy = x_opt[1,:]  # y
             ov = x_opt[2,:]  # velocity
-            oyaw = x_opt[3,:] # yaw
+            oyaw = np.arctan2(x_opt[3,:], x_opt[4,:]) # yaw
             
             oa = u_opt[0,:]
             odelta = u_opt[1,:]
@@ -400,13 +412,12 @@ class MPCController(Node):
             # 첫 입력
             a_cmd = oa[0]
             delta_cmd = odelta[0]
+            
+            # # warm start
+            self.prev_sol_x = x_opt
+            self.prev_sol_u = u_opt
 
-            print(f"[NonlinearMPC] status={status}, cost={obj_val:.3f}")
-            # # 저장해서 warm start에 쓰거나
-            # self.prev_sol_x = x_opt
-            # self.prev_sol_u = u_opt
-
-            return a_cmd, delta_cmd, ox, oy, oa ,oyaw
+            return a_cmd, delta_cmd, ox, oy, oa, oyaw
 
         except RuntimeError as e:
             print("[NonlinearMPC] Solve failed:", e)
@@ -419,7 +430,7 @@ class MPCController(Node):
             break
 
         target_ind, min_d_ = self.calc_global_nearest_index()
-        self.smooth_yaw()
+        # self.smooth_yaw()
         prev_time = 0.0
 
         while rclpy.ok():
@@ -445,7 +456,7 @@ class MPCController(Node):
     def publish_control(self, a_cmd, delta_cmd):
         drive_msg = AckermannDriveStamped()
         drive_msg.header.stamp = self.get_clock().now().to_msg()
-        drive_msg.header.frame_id = "/base_link"
+        drive_msg.header.frame_id = "/ego_racecar/base_link"
 
         drive_msg.drive.steering_angle = delta_cmd
         v_cmd = self.state[2] + a_cmd * self.DT
@@ -523,3 +534,11 @@ def main(args=None):
 if __name__ == '__main__':
     main()
     
+
+
+# To-Do:
+# 1. fix xref so it fits NX=5 [x, y, v, sin(yaw), cos(yaw)]
+#   1-1. smooth_yaw() might not be necessary? delete if it is. 
+#   1-2. mind in calc_nearest_index() could be used to determine "the real closest index" in sharp turns
+#        like U-turns or somewhat close.
+# 2. implement local path input
