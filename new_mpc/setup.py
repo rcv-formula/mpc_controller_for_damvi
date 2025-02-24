@@ -15,18 +15,16 @@ setup(
         ('share/' + package_name + '/config', ['config/config.yaml']),
         ('share/' + package_name + '/map', map_files),
     ],
-    install_requires=['setuptools', 'numpy', 'cvxpy', 'pyyaml', 'tf-transformations', 'casadi'],
+    install_requires=['setuptools', 'numpy', 'pyyaml', 'tf-transformations', 'casadi'],
     zip_safe=True,
-    maintainer='your_name',
-    maintainer_email='your_email@example.com',
+    maintainer='Jun Lim',
+    maintainer_email='gogownsud2@gmail.com',
     description='MPC-based local path planning and control for an RC car.',
     license='License declaration',
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'mpc_node = mpc_controller.mpc_node:main',
-            'new_mpc_node = mpc_controller.new_mpc_node:main',
-            'compare = mpc_controller.compare:main',
+            'kinematic_nonlinear = mpc_controller.kinematic_nonlinear:main',
         ],
     },
 )
