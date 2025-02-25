@@ -1,15 +1,17 @@
 import yaml, time, os, math, threading
 import rclpy.duration
-import rclpy, tf2_ros
+import rclpy
 import numpy as np
 import casadi as ca
 from rclpy.node import Node
-from nav_msgs.msg import Path, Odometry, OccupancyGrid
+from nav_msgs.msg import Path, Odometry
 from geometry_msgs.msg import PoseStamped
 from ackermann_msgs.msg import AckermannDriveStamped
 from std_msgs.msg import Float64
 from tf_transformations import euler_from_quaternion
 from ament_index_python.packages import get_package_share_directory
+
+from mpc_controller.csv_loader import csv_path_loader
 
 class MPCController(Node):
     def __init__(self):
@@ -17,27 +19,23 @@ class MPCController(Node):
 
         #load parameters from YAML file
         self.load_config()
-        
-        # TF2 buffer and listener
-        self.tf_buffer = tf2_ros.Buffer()
-        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
         # State and Control Variables
-        self.state = np.zeros(4)     # [x, y, v, yaw]
+        self.state = np.zeros(7)     # [x, y, vx, vy, sin(yaw), cos(yaw), r]
         self.control = np.zeros(2)   # [acceleration, steering_angle]
         self.raw_yaw = 0.0 # 각도 값 비정규화
 
         # Subscriber
         self.create_subscription(Odometry, '/odom', self.odom_callback, 10)
-        self.create_subscription(OccupancyGrid, '/local_costmap', self.local_costmap_callback, 10)
         self.create_subscription(Float64, '/commands/motor/speed', self.speed_callback, 10)
 
         # Publisher
         self.local_path_publisher = self.create_publisher(Path, '/local_path', 10)
         self.ackm_drive_publisher = self.create_publisher(AckermannDriveStamped, '/drive', 10)
 
-        # load_path_csv once
-        self.timer = self.create_timer(2.0, self.load_path_csv)
+        self.load_path_csv()
+        self.mpc_thread = threading.Thread(target=self.run_mpc, daemon=True)
+        self.mpc_thread.start()
 
     def load_config(self):
         # Load Parameters from YAML file
@@ -133,15 +131,16 @@ class MPCController(Node):
             self.get_logger().warn(f"Failed to load waypoints from {self.global_path_dir}: {e}")
             self.global_path_np = None
 
-        # Load CSV only once
-        self.timer.cancel()
+        # # Load CSV only once
+        # self.timer.cancel()
 
         # populate self.cx self.cy self.sp self.cyaw
         self.calc_global_path()
 
-        # All parameters are initialized
-        self.mpc_thread = threading.Thread(target=self.run_mpc, daemon=True)
-        self.mpc_thread.start()
+        # # All parameters are initialized
+        # self.mpc_thread = threading.Thread(target=self.run_mpc, daemon=True)
+        # self.mpc_thread.start()
+
 
     def calc_global_path(self):
 
