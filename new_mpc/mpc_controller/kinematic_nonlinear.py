@@ -4,12 +4,15 @@ import rclpy, tf2_ros
 import numpy as np
 import casadi as ca
 from rclpy.node import Node
-from nav_msgs.msg import Path, Odometry, OccupancyGrid
+from nav_msgs.msg import Path, Odometry
 from geometry_msgs.msg import PoseStamped
 from ackermann_msgs.msg import AckermannDriveStamped
 from std_msgs.msg import Float64
 from tf_transformations import euler_from_quaternion
 from ament_index_python.packages import get_package_share_directory
+
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
+from mpc_controller.path_processor import PathProcessor
 
 class MPCController(Node):
     def __init__(self):
@@ -17,27 +20,29 @@ class MPCController(Node):
 
         #load parameters from YAML file
         self.load_config()
-        
-        # TF2 buffer and listener
-        self.tf_buffer = tf2_ros.Buffer()
-        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
         # State and Control Variables
         self.state = np.zeros(5)     # [x, y, v, sin(yaw), cos(yaw)]
         self.control = np.zeros(2)   # [acceleration, steering_angle]
-        self.raw_yaw = 0.0 # 각도 값 비정규화
+        self.pind = None              # init value for calc_nearest_index(), if it is None, it will do global search
 
+        # 불러오기 - 객체 생성
+        self.path_processor = PathProcessor(self)
+
+        qos_profile = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,              # 신뢰성: Reliable
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,         # 지속성: Transient Local
+            history=HistoryPolicy.KEEP_LAST,                     # 히스토리: Keep Last
+            depth=1                                              # Depth 설정
+        )
         # Subscriber
         self.create_subscription(Odometry, '/ego_racecar/odom', self.odom_callback, 10)
-        self.create_subscription(OccupancyGrid, '/local_costmap', self.local_costmap_callback, 10)
         self.create_subscription(Float64, '/commands/motor/speed', self.speed_callback, 10)
+        self.create_subscription(Path, '/global_path', self.global_path_callback, qos_profile)     # /global_path 입력이 있어야 전체 MPC 시작 가능.
 
         # Publisher
         self.local_path_publisher = self.create_publisher(Path, '/local_path', 10)
         self.ackm_drive_publisher = self.create_publisher(AckermannDriveStamped, '/drive', 10)
-
-        # load_path_csv once
-        self.timer = self.create_timer(2.0, self.load_path_csv)
 
     def load_config(self):
         # Load Parameters from YAML file
@@ -94,6 +99,9 @@ class MPCController(Node):
             if key not in config:
                 raise ValueError(f"Missing required key in config: {key}")
 
+    def get_parameters(self):
+        return {"NX": self.NX, "N_IND_SEARCH" : self.N_IND_SEARCH, "laps" : self.laps}
+
     def odom_callback(self, msg):
         # Update robot's state from Odometry, however since we are using Cartographer speed value is not given.
         # Speed value can be obtained by differentiating positions, or it can also be obtained from VESC (wheel encoder)
@@ -115,30 +123,26 @@ class MPCController(Node):
         if not self.SIM_MODE :
             self.state[2] = msg.data / self.ERPM_GAIN
 
-    def local_costmap_callback(self, msg):
-        pass
+    def global_path_callback(self, msg:Path):
 
-    def load_path_csv(self):
-        # load csv to numpy array, then trasnform it to odometry frame
         try:
-            waypoints = np.loadtxt(self.global_path_dir, delimiter=',')
+            path_list = [[pose.pose.position.x, pose.pose.position.y, pose.pose.position.z] for pose in msg.poses]
+            waypoints = np.array(path_list)
 
             if waypoints.shape[1] != 3:
                 raise ValueError("Global path CSV must have exactly 3 columns: [x, y, velocity]")
 
             self.global_path_np = waypoints
             self.init_point = waypoints
-            self.get_logger().info(f"Loaded {len(self.global_path_np)} way points from {self.global_path_dir}")
+            self.get_logger().info(f"Loaded {len(self.global_path_np)} way points")
 
         except Exception as e:
             self.get_logger().warn(f"Failed to load waypoints from {self.global_path_dir}: {e}")
             self.global_path_np = None
 
-        # Load CSV only once
-        self.timer.cancel()
-
         # populate self.cx self.cy self.sp self.cyaw
         self.calc_global_path()
+        self.path_processor.calc_global_path(waypoints)
 
         # All parameters are initialized
         self.mpc_thread = threading.Thread(target=self.run_mpc, daemon=True)
@@ -537,8 +541,12 @@ if __name__ == '__main__':
 
 
 # To-Do:
-# 1. fix xref so it fits NX=5 [x, y, v, sin(yaw), cos(yaw)]
+# 1. [Finished] fix xref so it fits NX=5 [x, y, v, sin(yaw), cos(yaw)]
 #   1-1. smooth_yaw() might not be necessary? delete if it is. 
 #   1-2. mind in calc_nearest_index() could be used to determine "the real closest index" in sharp turns
 #        like U-turns or somewhat close.
 # 2. implement local path input
+#   2-1. xref가 local path를 반영할 수 있도록 바꾸기.
+#   2-2. 
+# 3. implement csv_path_loader made by jaesau
+#   3-1. check if it properly import numpy array
