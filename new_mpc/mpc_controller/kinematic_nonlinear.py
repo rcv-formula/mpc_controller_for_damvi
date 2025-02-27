@@ -100,7 +100,7 @@ class MPCController(Node):
             if key not in config:
                 raise ValueError(f"Missing required key in config: {key}")
 
-    def get_parameters(self):
+    def get_parameters(self): # parameter to send it to path_processor
         return {"NX": self.NX, "T" : self.T, "DT" : self.DT, "N_IND_SEARCH" : self.N_IND_SEARCH, "laps" : self.laps}
 
     def odom_callback(self, msg):
@@ -133,154 +133,19 @@ class MPCController(Node):
             if waypoints.shape[1] != 3:
                 raise ValueError("Global path CSV must have exactly 3 columns: [x, y, velocity]")
 
-            self.global_path_np = waypoints
-            self.init_point = waypoints
-            self.get_logger().info(f"Loaded {len(self.global_path_np)} way points")
+            self.get_logger().info(f"Loaded {len(waypoints)} way points")
 
         except Exception as e:
             self.get_logger().warn(f"Failed to load waypoints from {self.global_path_dir}: {e}")
-            self.global_path_np = None
 
         # populate self.cx self.cy self.sp self.cyaw
-        self.calc_global_path()
         self.path_processor.process_global_path(waypoints)
 
         # All parameters are initialized
         self.mpc_thread = threading.Thread(target=self.run_mpc, daemon=True)
         self.mpc_thread.start()
 
-    def calc_global_path(self):
-
-        self.global_path_np = np.tile(self.global_path_np[:-1], (self.laps, 1))
-
-        num_points = self.global_path_np.shape[0]
-        path_points = np.zeros((num_points, self.NX+1)) # [x, y, v, sin(yaw), cos(yaw), yaw]
-
-        for i in range(num_points-1):
-            # Current and next points
-            current_point = self.global_path_np[i]
-            next_point = self.global_path_np[i+1]
-
-            # Store x and y
-            path_points[i,0] = current_point[0]
-            path_points[i,1] = current_point[1]
-            path_points[i,2] = current_point[2] # reference velocity
-
-            # Calculate reference yaw (yaw)
-            dx = next_point[0] - current_point[0]
-            dy = next_point[1] - current_point[1]
-            path_points[i,5] = math.atan2(dy, dx)
-            path_points[i,3] = math.sin(path_points[i,5])
-            path_points[i,4] = math.cos(path_points[i,5])
-
-        # Last point, dx dy can not be calculated
-        path_points[-1,0] = self.global_path_np[-1,0]
-        path_points[-1,1] = self.global_path_np[-1,1]
-        path_points[-1,2] = self.global_path_np[-1,2] # reference velocity
-        path_points[-1,3] = path_points[-2,3]  # reference sin(yaw)
-        path_points[-1,4] = path_points[-2,4]  # reference cos(yaw)
-        path_points[-1,5] = path_points[-2,5] if num_points > 1 else 0.0 # reference yaw (optional)
-
-        # Path Point
-        self.cx = path_points[:,0]
-        self.cy = path_points[:,1]
-        self.sp = path_points[:,2]
-        self.sin_yaw = path_points[:,3]
-        self.cos_yaw = path_points[:,4]
-        self.cyaw = path_points[:,5]
-        
-        # path debugging
-        a = np.asanyarray([self.cx, self.cy, self.sp, self.sin_yaw, self.cos_yaw, self.cyaw])
-        np.savetxt("foo4.csv", a.T, delimiter=",")
-
-    def calc_global_nearest_index(self):
-
-        if self.state is None:
-            self.get_logger().warn("State is None")
-
-        dx = self.init_point[:,0] - self.state[0]
-        dy = self.init_point[:,1] - self.state[1]
-        d = np.sqrt(dx**2 + dy**2)
-
-        ind = np.argmin(d)
-        mind = math.sqrt(d[ind])
-
-        return ind, mind
-
-    def calc_nearest_index(self, pind):
-        # find nearest index
-        dx = [self.state[0] - icx for icx in self.cx[pind:(pind + self.N_IND_SEARCH)]]
-        dy = [self.state[1] - icy for icy in self.cy[pind:(pind + self.N_IND_SEARCH)]]
-
-        d = [idx ** 2 + idy ** 2 for (idx, idy) in zip(dx, dy)]
-
-        mind = min(d)
-
-        ind = d.index(mind) + pind
-        mind = math.sqrt(mind)
-
-        dxl = self.cx[ind] - self.state[0]
-        dyl = self.cy[ind] - self.state[1]
-
-        d_yaw = self.cyaw[ind] - math.atan2(dyl, dxl)
-        angle = self.angle_mod(d_yaw)
-        if angle < 0:
-            mind *= -1
-
-        return ind, mind
-
-    def calc_ref_trajectory(self, pind):
-        # calculates xref, dref, and call calc_nearest_index
-        
-        xref = np.zeros((self.NX, self.T + 1))
-        ncourse = len(self.cx)
-
-        ind, _ = self.calc_nearest_index(pind)
-
-        if pind >= ind:
-            ind = pind
-
-        xref[0,0] = self.cx[ind]
-        xref[1,0] = self.cy[ind]
-        xref[2,0] = self.sp[ind]
-        xref[3,0] = self.sin_yaw[ind]
-        xref[4,0] = self.cos_yaw[ind]
-
-        travel = 0.0
-        SPEED_FACTOR = 0.5
-        FIXED_INCREMENT = 1
-
-        for i in range(1, self.T + 1):
-            travel += abs(self.state[2]) * self.DT
-            # dind = int(travel / self.DL)
-            # dind = int(round(travel + self.state[2] * SPEED_FACTOR) / self.DL)
-            dind = i * FIXED_INCREMENT
-
-            if (ind + dind) <= ncourse -1:
-                xref[0,i] = self.cx[ind+dind]
-                xref[1,i] = self.cy[ind+dind]
-                xref[2,i] = self.sp[ind+dind]
-                xref[3,i] = self.sin_yaw[ind+dind]
-                xref[4,i] = self.cos_yaw[ind+dind]
-            # 마지막 index 초과했을 때
-            else:
-                xref[0,i] = self.cx[ncourse-1]
-                xref[1,i] = self.cy[ncourse-1]
-                xref[2,i] = self.sp[ncourse-1]
-                xref[3,i] = self.sin_yaw[ncourse-1]
-                xref[4,i] = self.cos_yaw[ncourse-1]
-
-        return xref, ind
-
     def nonlinear_mpc_control(self, xref):
-        """
-        Nonlinear MPC using CasADi + IPOPT
-        * State: [x, y, v, sin(yaw), cos(yaw)]
-        * Input: [a, delta]
-        * Model: simple bicycle (no acceleration state)
-        * T-step horizon
-        * xref: shape (5, T+1) = desired [x, y, v, sin(yaw), cos(yaw)] reference
-        """
 
         T = self.T         # 예: 예측 시간 스텝
         DT = self.DT       # 예: 시뮬레이션 / MPC step
@@ -391,9 +256,9 @@ class MPCController(Node):
         opti.solver("ipopt", opts)
 
         # # # (warm start) - OPTIONAL
-        # if self.prev_sol_x is not None:
-        #     opti.set_initial(X, self.prev_sol_x)
-        #     opti.set_initial(U, self.prev_sol_u)
+        if self.prev_sol_x is not None:
+            opti.set_initial(X, self.prev_sol_x)
+            opti.set_initial(U, self.prev_sol_u)
 
         # 11) Solve
         try:
@@ -429,12 +294,7 @@ class MPCController(Node):
             return None, None, None, None, None, None
     
     def run_mpc(self):
-        # csv 파일 읽고 변환을 못했으면 여기서 스탑.
-        while self.global_path_np is None or self.global_path_np.size == 0: 
-            self.get_logger().info("No Global Path, loading CSV might not have worked properly")
-            break
 
-        # target_ind, min_d_ = self.calc_global_nearest_index()
         target_ind, mind, l_ind = self.path_processor.calc_nearest_index(self.state, self.p_g_ind, self.p_l_ind)
         # self.smooth_yaw()
         prev_time = 0.0
@@ -445,7 +305,7 @@ class MPCController(Node):
             xref, target_ind, self.p_l_ind = self.path_processor.calc_ref_trajectory(self.state, target_ind, self.p_l_ind)
             self.local_path_visualizer(xref)
             a_cmd, delta_cmd, ox, oy, oa, oyaw = self.nonlinear_mpc_control(xref)
-            print(f"index : {self.p_g_ind}, xref : {xref[:,0]} state : {self.state}]")
+            print(f"index : {target_ind}, xref : {xref[:,0]} state : {self.state}]")
 
             if a_cmd is None or delta_cmd is None:
                 self.get_logger().warn("MPC solver failed. Using fallback controls.")
