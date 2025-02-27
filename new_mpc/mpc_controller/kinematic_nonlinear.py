@@ -24,7 +24,8 @@ class MPCController(Node):
         # State and Control Variables
         self.state = np.zeros(5)     # [x, y, v, sin(yaw), cos(yaw)]
         self.control = np.zeros(2)   # [acceleration, steering_angle]
-        self.pind = None              # init value for calc_nearest_index(), if it is None, it will do global search
+        self.p_g_ind = None          # init value for calc_nearest_index(), if it is None, it will do global search
+        self.p_l_ind = None          # flag and local_path_index, if it is None, global path will be used
 
         # 불러오기 - 객체 생성
         self.path_processor = PathProcessor(self)
@@ -100,7 +101,7 @@ class MPCController(Node):
                 raise ValueError(f"Missing required key in config: {key}")
 
     def get_parameters(self):
-        return {"NX": self.NX, "N_IND_SEARCH" : self.N_IND_SEARCH, "laps" : self.laps}
+        return {"NX": self.NX, "T" : self.T, "DT" : self.DT, "N_IND_SEARCH" : self.N_IND_SEARCH, "laps" : self.laps}
 
     def odom_callback(self, msg):
         # Update robot's state from Odometry, however since we are using Cartographer speed value is not given.
@@ -142,7 +143,7 @@ class MPCController(Node):
 
         # populate self.cx self.cy self.sp self.cyaw
         self.calc_global_path()
-        self.path_processor.calc_global_path(waypoints)
+        self.path_processor.process_global_path(waypoints)
 
         # All parameters are initialized
         self.mpc_thread = threading.Thread(target=self.run_mpc, daemon=True)
@@ -433,17 +434,18 @@ class MPCController(Node):
             self.get_logger().info("No Global Path, loading CSV might not have worked properly")
             break
 
-        target_ind, min_d_ = self.calc_global_nearest_index()
+        # target_ind, min_d_ = self.calc_global_nearest_index()
+        target_ind, mind, l_ind = self.path_processor.calc_nearest_index(self.state, self.p_g_ind, self.p_l_ind)
         # self.smooth_yaw()
         prev_time = 0.0
 
         while rclpy.ok():
             time_now = time.time()
 
-            xref, target_ind = self.calc_ref_trajectory(target_ind)
+            xref, target_ind, self.p_l_ind = self.path_processor.calc_ref_trajectory(self.state, target_ind, self.p_l_ind)
             self.local_path_visualizer(xref)
             a_cmd, delta_cmd, ox, oy, oa, oyaw = self.nonlinear_mpc_control(xref)
-            print(f"index : {target_ind}, xref : {xref[:,0]} state : {self.state}]")
+            print(f"index : {self.p_g_ind}, xref : {xref[:,0]} state : {self.state}]")
 
             if a_cmd is None or delta_cmd is None:
                 self.get_logger().warn("MPC solver failed. Using fallback controls.")
@@ -541,12 +543,6 @@ if __name__ == '__main__':
 
 
 # To-Do:
-# 1. [Finished] fix xref so it fits NX=5 [x, y, v, sin(yaw), cos(yaw)]
-#   1-1. smooth_yaw() might not be necessary? delete if it is. 
-#   1-2. mind in calc_nearest_index() could be used to determine "the real closest index" in sharp turns
-#        like U-turns or somewhat close.
+# 1. mind in calc_nearest_index() could be used to determine "the real closest index" in sharp turns like U-turns or somewhat close.
 # 2. implement local path input
-#   2-1. xref가 local path를 반영할 수 있도록 바꾸기.
-#   2-2. 
-# 3. implement csv_path_loader made by jaesau
-#   3-1. check if it properly import numpy array
+# 3. make subsriber that changes self.p_l_ind to None (local path flag)
