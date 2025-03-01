@@ -32,7 +32,6 @@ class PathProcessor:
         path_points[-1, 3:] = path_points[-2, 3:] if num_points > 1 else 0.0  # 마지막 점 보정
         
         self.global_path_np = path_points
-        print(self.global_path_np)
 
     def process_local_path(self, way_points):  # input [x, y, v, yaw] output [x, y, v, sin(yaw), cos(yaw), yaw]
 
