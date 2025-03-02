@@ -144,8 +144,6 @@ class MPCController(Node):
         self.mpc_thread.start()
 
     def nonlinear_mpc_control(self, xref):
-        # 속도를 위해, 모든 연산을 벡터화시켰습니다. 이에 코드 원리가 직관적이진 않습니다.
-        # 직관적인 코드는 for 문을 사용하는 옛날 코드를 참고하세요. 깃허브에 있습니다.
 
         T, DT, NX, NU = self.T, self.DT, self.NX, self.NU      # X = [x, y, v, sin(yaw), cos(yaw)], U = [a, delta]
 
@@ -159,63 +157,71 @@ class MPCController(Node):
         # 3) 비용(cost) 초기화
         cost_expr = 0.0
 
-        # 4) 동역학 방정식 (kinematic bicycle model)
+        # 4) 동역학 방정식 (자전거 모델)
         def bike_model(xk, uk):
             # xk = [x, y, v, sin(yaw), cos(yaw)], uk = [a, delta]
-            return ca.vertcat(
-                xk[0] + xk[2] * xk[4] * DT,         # x_{k+1} = x_k + v_k cos(yaw_k) dt
-                xk[1] + xk[2] * xk[3] * DT,         # y_{k+1} = y_k + v_k sin(yaw_k) dt
-                xk[2] + uk[0] * DT,                 # v_{k+1} = v_k + a_k dt
-                xk[3] + xk[4] * (xk[2] / self.WB) * ca.tan(uk[1]) * DT,
-                xk[4] - xk[3] * (xk[2] / self.WB) * ca.tan(uk[1]) * DT
+            
+            X_next = ca.vertcat(
+                xk[0] + xk[2]*xk[4]*DT,   # x_{k+1} = x_k + v_k cos(yaw_k) dt
+                xk[1] + xk[2]*xk[3]*DT,   # y_{k+1} = y_k + v_k sin(yaw_k) dt
+                xk[2] + uk[0]*DT,                 # v_{k+1} = v_k + a_k dt
+                xk[3] + xk[4]*(xk[2] / self.WB) * ca.tan(uk[1]) * DT,
+                xk[4] - xk[3]*(xk[2] / self.WB) * ca.tan(uk[1]) * DT
             )
+            return X_next
 
-        # 5) Cost & Constraint 설정
-        # 5-1) Error
-        pos_err = X[:2,:-1] - xref[:2,:-1]              # (2,T)
-        v_err   = X[2,:-1] - ca.vec(xref[2,:-1]).T      # (1,T)
-        yaw_err = X[3:5,:-1] - xref[3:5,:-1]            # (2,T)
+        # 5) 비용 + 제약 설정
+        for k in range(T):
+            # 5-1) Cost
+            pos_err = X[0:2,k] - xref[0:2,k]  # shape (2,)
+            v_err = X[2,k] - xref[2,k]  # (v_k - v_ref)
+            yaw_err = X[3:5,k] - xref[3:5,k]
 
-        # 5-2) Cost
-        cost_expr += ca.trace(ca.mtimes([pos_err.T, self.Q[:2,:2], pos_err]))      # position error cost
-        cost_expr += self.Q[2,2] * ca.sum2(v_err**2)                               # speed error cost
-        cost_expr += ca.trace(ca.mtimes([yaw_err.T, self.Q[3:5,3:5], yaw_err]))    # yaw (sin/cos) Cost
-        cost_expr += ca.trace(ca.mtimes([U.T, self.R, U]))                         # control input Cost
-        
-        # 5-3) Steering rate Cost & Constraint
-        du = U[:,1:] - U[:, :-1]              # (2, T-1)
-        cost_expr += ca.trace(ca.mtimes([du.T, self.Rd, du]))                  # steering rate change cost
-        opti.subject_to( ( U[1,1:] - U[1,:-1] ) <= self.MAX_DSTEER * DT )      # steering rate constraint
-        opti.subject_to( ( U[1,1:] - U[1,:-1] ) >= -self.MAX_DSTEER * DT )    
-        
-        # 5-4) state prediction & 동역학 constraint
-        x_next = bike_model(X[:,:-1], U)      # next state prediction
-        opti.subject_to(X[:, 1:] == x_next)   # dynmic constraint
+            cost_expr += ca.mtimes([pos_err.T, self.Q[0:2, 0:2], pos_err])
+            cost_expr += (v_err**2) * self.Q[2,2]
+            cost_expr += ca.mtimes([yaw_err.T, self.Q[3:5,3:5],yaw_err])
+            
+            # 5-2) input Cost
+            a_k     = U[0,k]
+            delta_k = U[1,k]
+            u_vec   = ca.vertcat(a_k, delta_k)
+            cost_expr += ca.mtimes([u_vec.T, self.R, u_vec])
 
-        # 6) Terminal Cost & Constaint
-        # 6-1) Error
-        pos_err_final = X[:2, -1] - xref[:2, -1]
-        v_err_final = X[2, -1] - ca.vec(xref[2, -1])
-        yaw_err_final = X[3:5, -1] - xref[3:5, -1]
+            # 5-3) Dynamic Constaint
+            x_next = bike_model(X[:,k], U[:,k])
+            opti.subject_to( X[:,k+1] == x_next )
 
-        # 6-2) Cost
-        cost_expr += ca.mtimes([pos_err_final.T, self.Qf[:2, :2], pos_err_final])
-        cost_expr += self.Qf[2, 2] * v_err_final**2
+            # 5-4) input difference Cost & Constraint
+            if k < T-1:
+                # Rd 부분
+                du = U[:,k+1] - U[:,k]
+                cost_expr += ca.mtimes([du.T, self.Rd, du])
+                # ex: 조향속도 제한
+                opti.subject_to( ( U[1,k+1] - U[1,k] ) <= self.MAX_DSTEER * DT )
+                opti.subject_to( ( U[1,k+1] - U[1,k] ) >= -self.MAX_DSTEER * DT )
+
+        # 6) Terminal Cost
+        pos_err_final = X[0:2, T] - xref[0:2, T]
+        v_err_final = X[2, T] - xref[2, T] 
+        yaw_err_final = X[3:5, T] - xref[3:5, T]
+
+        cost_expr += ca.mtimes([pos_err_final.T, self.Qf[0:2, 0:2], pos_err_final])
+        cost_expr += ( v_err_final**2 ) * self.Qf[2,2]
         cost_expr += ca.mtimes([yaw_err_final.T, self.Qf[3:5, 3:5], yaw_err_final])
 
-        # 7) Intial State Constraint
-        x_init = ca.vertcat(self.state[0], self.state[1], self.state[2], self.state[3], self.state[4])
-        opti.subject_to(X[:, 0] == x_init)
+        # 7) Initial Constraint (현재 state)
+        x_init = np.array([self.state[0], self.state[1], self.state[2], self.state[3], self.state[4]])  # [x, y, v, sin(yaw), cos(yaw)]
+        opti.subject_to( X[:,0] == x_init )
 
         # 8) Hard Constraint
-        opti.subject_to(U[0, :] <= self.MAX_ACCEL)
-        opti.subject_to(U[0, :] >= -self.MAX_ACCEL)
-        opti.subject_to(U[1, :] <= self.MAX_STEER)
-        opti.subject_to(U[1, :] >= -self.MAX_STEER)
-        opti.subject_to(X[2, :] >= self.MIN_SPEED)
-        opti.subject_to(X[2, :] <= self.MAX_SPEED)
+        opti.subject_to( (U[0,:]) <= self.MAX_ACCEL )
+        opti.subject_to( (U[0,:]) >= -self.MAX_ACCEL )
+        opti.subject_to( (U[1,:]) <= self.MAX_STEER )
+        opti.subject_to( (U[1,:]) >= -self.MAX_STEER )
+        opti.subject_to( X[2,:] >= self.MIN_SPEED )
+        opti.subject_to( X[2,:] <= self.MAX_SPEED )
 
-        # 9) 목적함수 설정
+        # 9) Set Cost Function
         opti.minimize( cost_expr )
 
         # 10) Solver 옵션 (IPOPT)
@@ -229,7 +235,7 @@ class MPCController(Node):
         }
         opti.solver("ipopt", opts)
 
-        # warm start - OPTIONAL
+        # Warm Start - optional
         if self.prev_sol_x is not None:
             opti.set_initial(X, self.prev_sol_x)
             opti.set_initial(U, self.prev_sol_u)
@@ -244,18 +250,20 @@ class MPCController(Node):
 
             print(f"[NonlinearMPC] status={status}, cost={obj_val:.3f}")
 
-            # Result
-            ox, oy, ov = x_opt[:3, :]
-            oyaw = np.arctan2(x_opt[3, :], x_opt[4, :])  # sin/cos → yaw 변환
-            oa, odelta = u_opt
+            # 필요 시 numpy 변환
+            ox = x_opt[0,:]  # x
+            oy = x_opt[1,:]  # y
+            ov = x_opt[2,:]  # velocity
+            oyaw = np.arctan2(x_opt[3,:], x_opt[4,:]) # yaw
             
             oa = u_opt[0,:]
             odelta = u_opt[1,:]
 
-            # First Control Input
-            a_cmd, delta_cmd = oa[0], odelta[0]
+            # 첫 입력
+            a_cmd = oa[0]
+            delta_cmd = odelta[0]
             
-            # for warm start
+            # # warm start
             self.prev_sol_x = x_opt
             self.prev_sol_u = u_opt
 
@@ -267,8 +275,9 @@ class MPCController(Node):
     
     def run_mpc(self):
 
-        target_ind, mind, l_ind = self.path_processor.calc_nearest_index(self.state, self.p_g_ind, self.p_l_ind)
-        # self.smooth_yaw()
+        target_ind, mind, self.p_l_ind = self.path_processor.calc_nearest_index(self.state, self.p_g_ind, self.p_l_ind)
+        self.p_g_ind = target_ind
+
         prev_time = 0.0
 
         while rclpy.ok():
@@ -327,37 +336,6 @@ class MPCController(Node):
             path_msg.poses.append(pose)
         
         self.local_path_publisher.publish(path_msg)
-
-    def smooth_yaw(self):
-
-        for i in range(len(self.cyaw) - 1):
-            dyaw = self.cyaw[i + 1] - self.cyaw[i]
-
-            while dyaw >= math.pi :
-            # if dyaw >= math.pi:
-                self.cyaw[i + 1] -= 2.0 * math.pi
-                dyaw = self.cyaw[i + 1] - self.cyaw[i]
-
-            while dyaw < -math.pi :
-            # elif dyaw < -math.pi:
-                self.cyaw[i + 1] += 2.0 * math.pi
-                dyaw = self.cyaw[i + 1] - self.cyaw[i]
-
-    def angle_mod(self, x):
-
-        if isinstance(x, float):
-            is_float = True
-        else:
-            is_float = False
-
-        x = np.asarray(x).flatten()
-
-        mod_angle = (x + np.pi) % (2 * np.pi) - np.pi
-
-        if is_float:
-            return mod_angle.item()
-        else:
-            return mod_angle
 
 def main(args=None):
     rclpy.init(args=args)
