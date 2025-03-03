@@ -15,37 +15,29 @@ class PathProcessor:
         self.global_path_np = None     # [x, y, v, sin(yaw), cos(yaw), yaw]
         self.local_path_np = None      # [x, y, v, sin(yaw), cos(yaw), yaw]
 
-    def process_global_path(self, way_points):   # input [x, y, v] output [x, y, v, sin(yaw), cos(yaw), yaw]
+    def process_path(self, way_points, flag):   # input [x, y, v], flag : 0 = global, 1 = local // output [x, y, v, sin(yaw), cos(yaw), yaw]
         
-        self.g_num_points = len(way_points)
-        self.global_path_np = np.tile(way_points[:-1], (self.laps, 1))
+        if flag == 0:              # global path
+            self.g_num_points = len(way_points)
+            way_points = np.tile(way_points[:-1], (self.laps, 1))
+        elif flag == 1:            # local path
+            self.l_num_points = len(way_points)
 
-        num_points = self.global_path_np.shape[0]
+        num_points = len(way_points)
         path_points = np.zeros((num_points, self.NX+1)) # [x, y, v, sin(yaw), cos(yaw), yaw]
 
-        path_points[:, :3] = self.global_path_np[:, :3] # [x, y, v]
-        dx = np.diff(self.global_path_np[:, 0], append=self.global_path_np[-1, 0])
-        dy = np.diff(self.global_path_np[:, 1], append=self.global_path_np[-1, 1])
+        path_points[:, :3] = way_points[:, :3] # [x, y, v]
+        dx = np.diff(path_points[:, 0], append=path_points[-1, 0])
+        dy = np.diff(path_points[:, 1], append=path_points[-1, 1])
         path_points[:, 5] = np.arctan2(dy, dx)         # yaw
         path_points[:, 3] = np.sin(path_points[:, 5])  # sin(yaw)
         path_points[:, 4] = np.cos(path_points[:, 5])  # cos(yaw)
         path_points[-1, 3:] = path_points[-2, 3:] if num_points > 1 else 0.0  # 마지막 점 보정
         
-        self.global_path_np = path_points
-
-    def process_local_path(self, way_points):  # input [x, y, v, yaw] output [x, y, v, sin(yaw), cos(yaw), yaw]
-
-        self.l_num_points = len(way_points)
-        path_points = np.zeros((self.l_num_points, self.NX+1)) # [x, y, v, sin(yaw), cos(yaw), yaw]
-
-        path_points[:, :3] = way_points[:, :3]        # [x, y, v]
-        dx = np.diff(self.global_path_np[:, 0], append=self.global_path_np[-1, 0])
-        dy = np.diff(self.global_path_np[:, 1], append=self.global_path_np[-1, 1])
-        path_points[:, 3] = np.sin(way_points[:, 3])  # [sin(yaw)]
-        path_points[:, 4] = np.cos(way_points[:, 3])  # [cos(yaw)]
-        path_points[:, 5] = way_points[:, 3]          # [yaw]
-
-        self.local_path_np = path_points
+        if flag == 0:              # global path
+            self.global_path_np = path_points
+        elif flag == 1:            # local path
+            self.local_path_np = path_points
 
     def calc_nearest_index(self, state, p_g_ind, p_l_ind): # input self.state, previous index(global), previous index(local)
         

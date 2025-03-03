@@ -5,11 +5,11 @@ from rclpy.node import Node
 from nav_msgs.msg import Path, Odometry
 from geometry_msgs.msg import PoseStamped
 from ackermann_msgs.msg import AckermannDriveStamped
-from std_msgs.msg import Float64
+from std_msgs.msg import Float64, Bool
 from tf_transformations import euler_from_quaternion
 from ament_index_python.packages import get_package_share_directory
-
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
+
 from mpc_controller.path_processor import PathProcessor
 
 class MPCController(Node):
@@ -38,9 +38,11 @@ class MPCController(Node):
         self.create_subscription(Odometry, '/ego_racecar/odom', self.odom_callback, 10)
         self.create_subscription(Float64, '/commands/motor/speed', self.speed_callback, 10)
         self.create_subscription(Path, '/global_path', self.global_path_callback, qos_profile)     # /global_path 입력이 있어야 전체 MPC 시작 가능.
+        self.create_subscription(Path, '/local_path', self.local_path_callback, 10)                # /local_path 입력
+        self.create_subscription(Bool, '/local_flag', self.local_flag_callback, 10)                # local_path Flag : True여야 Local Path 사용
 
         # Publisher
-        self.local_path_publisher = self.create_publisher(Path, '/local_path', 10)
+        self.local_path_publisher = self.create_publisher(Path, '/local_path_vis', 10)
         self.ackm_drive_publisher = self.create_publisher(AckermannDriveStamped, '/drive', 10)
 
     def load_config(self):
@@ -125,8 +127,7 @@ class MPCController(Node):
     def global_path_callback(self, msg:Path):
 
         try:
-            path_list = [[pose.pose.position.x, pose.pose.position.y, pose.pose.position.z] for pose in msg.poses]
-            waypoints = np.array(path_list)
+            waypoints = np.array([(pose.pose.position.x, pose.pose.position.y, pose.pose.position.z) for pose in msg.poses])
 
             if waypoints.shape[1] != 3:
                 raise ValueError("Global path CSV must have exactly 3 columns: [x, y, velocity]")
@@ -136,12 +137,34 @@ class MPCController(Node):
         except Exception as e:
             self.get_logger().warn(f"Failed to load waypoints from {self.global_path_dir}: {e}")
 
-        # populate self.cx self.cy self.sp self.cyaw
-        self.path_processor.process_global_path(waypoints)
+        # process global path # flag = 0
+        self.path_processor.process_path(waypoints, 0) # 
 
         # All parameters are initialized
         self.mpc_thread = threading.Thread(target=self.run_mpc, daemon=True)
         self.mpc_thread.start()
+
+    def local_path_callback(self, msg:Path):
+        
+        try:
+            waypoints = np.array([(pose.pose.position.x, pose.pose.position.y, pose.pose.position.z) for pose in msg.poses])
+
+            if waypoints.shape[1] != 3:
+                raise ValueError("Local path must have exactly 3 columns: [x, y, velocity]")
+
+            self.get_logger().info(f"Local Path : loaded {len(waypoints)} way points")
+
+        except Exception as e:
+            self.get_logger().warn(f"Failed to load local path : {e}")
+
+        # process local path # flag = 1
+        self.path_processor.process_path(waypoints, 1)
+        self.p_l_ind = 0
+    
+    def local_flag_callback(self, msg:Bool):       # set self.p_l_ind (local path flag) to None if it is False
+        
+        if msg is False:
+            self.p_l_ind = None
 
     def nonlinear_mpc_control(self, xref):
 
@@ -298,7 +321,7 @@ class MPCController(Node):
             prev_time = time_now
 
             self.publish_control(a_cmd, delta_cmd)
-            time.sleep(0.1)
+
             print(f"MPC Loop : {time_elasped} s")
     
     def publish_control(self, a_cmd, delta_cmd):
